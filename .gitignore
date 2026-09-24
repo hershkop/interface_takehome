@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.log
+
+# Assignment brief — not ours to redistribute
+Assignment A — Computer-Use Automation System.pdf
+
+# Run output. Curated example runs are committed with `git add -f`.
+evidence/*
+!evidence/.gitkeep
+!evidence/examples/

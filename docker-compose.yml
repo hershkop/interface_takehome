@@ -1,0 +1,15 @@
+services:
+  parabank:
+    # Pinned by digest so seeded account IDs stay reproducible for reviewers.
+    # See docs/DAY0-FINDINGS.md for the seed state this yields.
+    image: parasoft/parabank@sha256:8c08664c7b4be5dc3b1dcf5bbc75f57bbcc1b363ea063fae873409a0883a8e44
+    container_name: parabank
+    ports:
+      - "${PARABANK_PORT:-8080}:8080"
+    healthcheck:
+      # The image ships neither curl nor wget, so probe the port with bash's /dev/tcp.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
