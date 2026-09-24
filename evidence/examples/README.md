@@ -4,7 +4,7 @@ Six real runs, committed as produced. Nothing here is hand-written.
 
 | directory | what it shows |
 |---|---|
-| `01-discovery-llm-run` | A genuine `claude-opus-5` run against live ParaBank. 10 model calls, 8 steps recorded. `run.json` names the model; `events.jsonl` carries the model's rationale for each action and the ARIA observations it worked from |
+| `01-discovery-llm-run` | A genuine `claude-opus-5` run against live ParaBank. 10 model calls, 8 steps recorded. `run.json` names the model; `events.jsonl` carries the model's rationale for each action. Note the two `policy.denied` events: the model first tried the public `parabank.parasoft.com`, was refused by the origin allowlist, and re-targeted the local instance — the guard working during discovery, not just replay |
 | `02-discovery-refused-irreversible` | The same engine told to perform a transfer, **running unattended**. It filled the form, was refused the Transfer click by the risk gate, and declined to bypass it by POSTing directly — then gave up so a human could take over |
 | `03-replay-discovered-artifact` | The **discovered** capability replayed against account `12345` — one the model never visited. `modelCalls: 0` |
 | `04-replay-business-outcome` | Account `99999` → `business_outcome: account_not_found`. Exit code 0: an answer, not a failure |
