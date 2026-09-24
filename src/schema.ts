@@ -130,6 +130,24 @@ export const ActionType = z.enum([
 ]);
 export type ActionType = z.infer<typeof ActionType>;
 
+// ─── Engine error codes ────────────────────────────────────────────────────────
+//
+// Defined here, above the handlers that reference them, so an artifact cannot declare a failure
+// the result contract is unable to represent. Business outcomes are open strings (they are
+// app-specific and the caller switches on them); engine failures are a closed set, because the
+// caller has to be able to handle every one of them.
+
+export const ErrorCode = z.enum([
+  "TARGET_NOT_FOUND",
+  "TARGET_AMBIGUOUS",
+  "STEP_TIMEOUT",
+  "CHECKPOINT_FAILED",
+  "POLICY_DENIED",
+  "APP_ERROR",
+  "HUMAN_ABORTED",
+]);
+export type ErrorCode = z.infer<typeof ErrorCode>;
+
 // ─── Risk ──────────────────────────────────────────────────────────────────────
 
 export const RiskClass = z.enum(["safe", "approval_required", "blocked"]);
@@ -146,6 +164,28 @@ export type RiskClass = z.infer<typeof RiskClass>;
 //      override without forking the flow.
 // Handlers are evaluated before AND after every step, not only at the end.
 
+const MaxAttempts = z.number().int().min(1).max(5).default(1);
+
+/**
+ * Keyed by `remedy` rather than carrying an optional target for every variant, so that
+ * `dismiss` — the only remedy that needs to know what to click — cannot be written without one.
+ * A recovery instruction the interpreter cannot deterministically execute should not parse.
+ */
+export const RecoverDisposition = z.discriminatedUnion("remedy", [
+  z.object({
+    kind: z.literal("recover"),
+    remedy: z.literal("dismiss"),
+    target: Target,
+    maxAttempts: MaxAttempts,
+  }),
+  z.object({ kind: z.literal("recover"), remedy: z.literal("retry_step"), maxAttempts: MaxAttempts }),
+  z.object({
+    kind: z.literal("recover"),
+    remedy: z.literal("reauthenticate"),
+    maxAttempts: MaxAttempts,
+  }),
+]);
+
 export const HandlerDisposition = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("business_outcome"),
@@ -153,14 +193,9 @@ export const HandlerDisposition = z.discriminatedUnion("kind", [
     outcome: z.string().min(1),
     detail: z.record(z.string(), z.string()).optional(),
   }),
-  z.object({
-    kind: z.literal("recover"),
-    remedy: z.enum(["dismiss", "retry_step", "reauthenticate"]),
-    /** `dismiss` needs to know what to click. */
-    target: Target.optional(),
-    maxAttempts: z.number().int().min(1).max(5).default(1),
-  }),
-  z.object({ kind: z.literal("fail"), code: z.string().min(1) }),
+  RecoverDisposition,
+  /** Closed set: an artifact must not declare a failure RunError cannot carry. */
+  z.object({ kind: z.literal("fail"), code: ErrorCode }),
 ]);
 export type HandlerDisposition = z.infer<typeof HandlerDisposition>;
 
@@ -184,6 +219,18 @@ export const InputDefinition = z.object({
   default: z.unknown().optional(),
   /** Redact this value everywhere it would otherwise be logged or screenshotted. */
   sensitive: z.boolean().default(false),
+}).superRefine((input, ctx) => {
+  // Otherwise an artifact validates, then dies at execution time when an omitted input falls
+  // back to a default of the wrong type.
+  if (input.default === undefined) return;
+  const actual = typeof input.default;
+  if (actual !== input.type) {
+    ctx.addIssue({
+      code: "custom",
+      message: `default for a "${input.type}" input is a ${actual}`,
+      path: ["default"],
+    });
+  }
 });
 export type InputDefinition = z.infer<typeof InputDefinition>;
 
@@ -229,6 +276,40 @@ export type ArtifactStep = z.infer<typeof ArtifactStep>;
 
 // ─── The capability artifact ───────────────────────────────────────────────────
 
+/** Shape of an artifact before refinement — what the traversal helper below walks. */
+type ArtifactShape = {
+  steps: ArtifactStep[];
+  outputs: Record<string, OutputDefinition>;
+  handlers: Handler[];
+};
+
+/**
+ * Every place a Target can appear, in one place. Any rule about targeting (today: coordinates
+ * block approval) applies uniformly rather than to whichever locations someone remembered.
+ */
+export function collectTargets(artifact: ArtifactShape): Array<{ where: string; target: Target }> {
+  const found: Array<{ where: string; target: Target }> = [];
+
+  for (const [i, step] of artifact.steps.entries()) {
+    if ("target" in step.action) {
+      found.push({ where: `steps[${i}] "${step.id}"`, target: step.action.target });
+    }
+  }
+  for (const [name, output] of Object.entries(artifact.outputs)) {
+    if (output.source.kind === "locator") {
+      found.push({ where: `outputs.${name}`, target: output.source.target });
+    }
+  }
+  for (const handler of artifact.handlers) {
+    const d = handler.disposition;
+    if (d.kind === "recover" && d.remedy === "dismiss") {
+      found.push({ where: `handlers.${handler.id}`, target: d.target });
+    }
+  }
+  return found;
+}
+// ─── The capability artifact ───────────────────────────────────────────────────
+
 export const CapabilityArtifact = z
   .object({
     schemaVersion: z.literal("1.0"),
@@ -246,7 +327,14 @@ export const CapabilityArtifact = z
       name: z.string().min(1),
       description: z.string().min(1),
       status: z.enum(["draft", "approved"]).default("draft"),
-      risk: RiskClass.default("safe"),
+      /**
+       * Required, with no default. A recorder bug or a truncated generated artifact must not be
+       * able to produce something that executes unattended by omission. Defaulting to
+       * `approval_required` instead would be the other fail-closed choice, but it would put a
+       * human in front of every read-only lookup and defeat the unattended replay path — so the
+       * classification is simply mandatory. Step-level `risk` stays optional and inherits this.
+       */
+      risk: RiskClass,
       recordedAt: z.iso.datetime(),
       recordedBy: z.enum(["llm", "human"]),
       /** Present when recordedBy === "llm". Kept for provenance, not for replay. */
@@ -307,24 +395,58 @@ export const CapabilityArtifact = z
       }
     }
 
-    // Coordinates are inherently unreviewable. An artifact holding one stays a draft.
-    const usesCoordinates = artifact.steps.some(
-      (s) => "target" in s.action && s.action.target.candidates.some((c) => c.strategy === "coordinates"),
-    );
-    if (usesCoordinates && artifact.metadata.status === "approved") {
-      ctx.addIssue({
-        code: "custom",
-        message: "artifact uses coordinate targeting and cannot be approved for unattended replay",
-        path: ["metadata", "status"],
-      });
+    // Coordinates are inherently unreviewable. An artifact holding one anywhere stays a draft.
+    // Checking only steps would miss output locators and dismiss-handler targets, which are
+    // just as much part of what replay executes.
+    if (artifact.metadata.status === "approved") {
+      for (const { where, target } of collectTargets(artifact)) {
+        if (target.candidates.some((c) => c.strategy === "coordinates")) {
+          ctx.addIssue({
+            code: "custom",
+            message:
+              `coordinate targeting at ${where} cannot be approved for unattended replay`,
+            path: ["metadata", "status"],
+          });
+        }
+      }
     }
   });
 export type CapabilityArtifact = z.infer<typeof CapabilityArtifact>;
 
 // ─── Policy ────────────────────────────────────────────────────────────────────
+//
+// `z.url()` is far too permissive for a safety boundary: it accepts `javascript:alert(1)`,
+// `data:` URLs, embedded credentials, and full paths with query strings. An allowlist entry has
+// to be a canonical HTTP(S) origin and nothing else, so it is parsed and normalised here.
+
+export const HttpOrigin = z.string().transform((value, ctx) => {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    ctx.addIssue({ code: "custom", message: `not a URL: ${value}` });
+    return z.NEVER;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    ctx.addIssue({ code: "custom", message: `origin must be http(s), got ${url.protocol}` });
+    return z.NEVER;
+  }
+  if (url.username || url.password) {
+    ctx.addIssue({ code: "custom", message: "origin must not embed credentials" });
+    return z.NEVER;
+  }
+  if ((url.pathname && url.pathname !== "/") || url.search || url.hash) {
+    ctx.addIssue({
+      code: "custom",
+      message: `origin must not carry a path, query, or fragment: ${value}`,
+    });
+    return z.NEVER;
+  }
+  return url.origin;
+});
 
 export const Policy = z.object({
-  allowedOrigins: z.array(z.string().url()).min(1),
+  allowedOrigins: z.array(HttpOrigin).min(1),
   /** Globs matched against pathname. Empty = any path under an allowed origin. */
   allowedPaths: z.array(z.string()).default([]),
   allowedActions: z.array(ActionType).default([...ActionType.options]),
@@ -375,17 +497,6 @@ export const SessionOwner = z.enum(["automation", "human"]);
 export type SessionOwner = z.infer<typeof SessionOwner>;
 
 // ─── Run results ───────────────────────────────────────────────────────────────
-
-export const ErrorCode = z.enum([
-  "TARGET_NOT_FOUND",
-  "TARGET_AMBIGUOUS",
-  "STEP_TIMEOUT",
-  "CHECKPOINT_FAILED",
-  "POLICY_DENIED",
-  "APP_ERROR",
-  "HUMAN_ABORTED",
-]);
-export type ErrorCode = z.infer<typeof ErrorCode>;
 
 export const RunError = z.object({
   code: ErrorCode,

@@ -1,4 +1,7 @@
 node_modules/
+
+# Local review checkouts
+review-*/
 dist/
 .env
 *.log

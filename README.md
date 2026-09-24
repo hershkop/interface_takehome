@@ -71,9 +71,17 @@ hidden content is opt-in. ([DAY0-FINDINGS §3](docs/DAY0-FINDINGS.md))
 **Targets are ordered candidate lists, not selectors.** Replay walks the list and requires
 *exactly one visible match* — zero matches and ambiguous matches are both failures, because a
 replay that guesses is worse than one that stops. Ordering encodes robustness preference:
-accessible role+name → label → visible text → stable id → structural CSS → coordinates. An
-artifact containing a coordinate target cannot be marked `approved`; the schema enforces it.
+accessible role+name → label → visible text → stable id → structural CSS → coordinates. A
+coordinate target *anywhere* in an artifact — a step, an output locator, or a dismiss handler —
+blocks `approved` status, and the error names which one.
 
 **Business outcome, recoverable condition, and hard failure are declared in the artifact, not
 branched in the engine.** A `Handler` pairs a match condition with one of three dispositions.
-Recovery is never open-ended: a remedy is one of three named verbs with an attempt cap.
+Recovery is never open-ended: a remedy is one of three named verbs with an attempt cap, and
+`dismiss` cannot be written without saying what to dismiss. Business outcomes are open strings
+(they are app-specific); engine failures are a closed set, so a caller can handle all of them.
+
+**Risk classification is mandatory.** `metadata.risk` has no default. A truncated recorder
+output or an incomplete generated artifact must not be able to execute unattended *by omission* —
+it fails validation instead. Defaulting to `approval_required` would be the other fail-closed
+choice, but it would put a human in front of every read-only lookup.
