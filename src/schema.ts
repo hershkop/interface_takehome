@@ -576,6 +576,8 @@ export const EvidenceSummary = z.object({
   screenshots: z.array(z.string()).default([]),
   /** Redacted ARIA/URL/alert capture written on failure. The default rich failure signal. */
   failureSnapshot: z.string().optional(),
+  /** Present when a human held the session during this run. */
+  humanActions: z.string().optional(),
   /**
    * Replay asserts this is 0. It turns "no LLM in the decision loop" from a claim in the
    * write-up into a fact in the run record.

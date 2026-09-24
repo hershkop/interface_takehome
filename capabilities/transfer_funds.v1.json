@@ -1,0 +1,214 @@
+{
+  "schemaVersion": "1.0",
+  "capabilityId": "transfer_funds",
+  "version": "1.0.0",
+  "metadata": {
+    "name": "Transfer funds between accounts",
+    "description": "Fill the ParaBank transfer form and reach the confirmation screen. The submitting step is irreversible and requires a human.",
+    "status": "approved",
+    "risk": "safe",
+    "recordedAt": "2026-09-24T00:00:00.000Z",
+    "recordedBy": "human"
+  },
+  "target": {
+    "app": "parabank",
+    "appFingerprint": "parasoft/parabank@sha256:8c08664c",
+    "baseUrl": "http://localhost:18080/parabank"
+  },
+  "inputs": {
+    "fromAccount": { "type": "string", "required": true, "pattern": "^[0-9]{1,10}$" },
+    "toAccount": { "type": "string", "required": true, "pattern": "^[0-9]{1,10}$" },
+    "amount": { "type": "string", "required": true, "pattern": "^[0-9]+(\\.[0-9]{1,2})?$" }
+  },
+  "outputs": {
+    "confirmedAmount": {
+      "type": "string",
+      "source": { "kind": "variable", "name": "resultAmount" },
+      "coerce": "trim",
+      "onMissing": "fail"
+    },
+    "confirmedFrom": {
+      "type": "string",
+      "source": { "kind": "variable", "name": "resultFrom" },
+      "coerce": "trim",
+      "onMissing": "fail"
+    },
+    "confirmedTo": {
+      "type": "string",
+      "source": { "kind": "variable", "name": "resultTo" },
+      "coerce": "trim",
+      "onMissing": "fail"
+    }
+  },
+  "steps": [
+    {
+      "id": "open_login",
+      "action": { "action": "navigate", "url": "{{baseUrl}}/index.htm" },
+      "postcondition": { "kind": "role", "role": "heading", "name": "Customer Login" }
+    },
+    {
+      "id": "enter_username",
+      "action": {
+        "action": "fill",
+        "target": {
+          "description": "Username field",
+          "candidates": [
+            { "strategy": "role", "role": "textbox", "name": "Username" },
+            { "strategy": "css", "value": "input[name='username']" }
+          ]
+        },
+        "value": "{{secrets.parabankUsername}}"
+      }
+    },
+    {
+      "id": "enter_password",
+      "action": {
+        "action": "fill",
+        "target": {
+          "description": "Password field",
+          "candidates": [{ "strategy": "css", "value": "input[name='password']" }]
+        },
+        "value": "{{secrets.parabankPassword}}"
+      }
+    },
+    {
+      "id": "submit_login",
+      "action": {
+        "action": "click",
+        "target": {
+          "description": "Log In button",
+          "candidates": [
+            { "strategy": "role", "role": "button", "name": "Log In" },
+            { "strategy": "css", "value": "input[value='Log In']" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "await_overview",
+      "action": {
+        "action": "wait",
+        "condition": { "kind": "title", "value": "Accounts Overview" },
+        "timeoutMs": 15000
+      }
+    },
+    {
+      "id": "open_transfer",
+      "action": { "action": "navigate", "url": "{{baseUrl}}/transfer.htm" },
+      "postcondition": { "kind": "role", "role": "button", "name": "Transfer" }
+    },
+    {
+      "id": "enter_amount",
+      "action": {
+        "action": "fill",
+        "target": {
+          "description": "Amount field",
+          "candidates": [{ "strategy": "css", "value": "#amount" }]
+        },
+        "value": "{{inputs.amount}}"
+      },
+      "rationale": "The amount input carries no accessible name — the label is adjacent text — so #amount is the most stable candidate this surface offers."
+    },
+    {
+      "id": "choose_from_account",
+      "action": {
+        "action": "select",
+        "target": {
+          "description": "From account dropdown",
+          "candidates": [{ "strategy": "css", "value": "#fromAccountId" }]
+        },
+        "value": "{{inputs.fromAccount}}"
+      }
+    },
+    {
+      "id": "choose_to_account",
+      "action": {
+        "action": "select",
+        "target": {
+          "description": "To account dropdown",
+          "candidates": [{ "strategy": "css", "value": "#toAccountId" }]
+        },
+        "value": "{{inputs.toAccount}}"
+      }
+    },
+    {
+      "id": "submit_transfer",
+      "risk": "approval_required",
+      "action": {
+        "action": "click",
+        "target": {
+          "description": "Transfer button",
+          "candidates": [
+            { "strategy": "role", "role": "button", "name": "Transfer" },
+            { "strategy": "css", "value": "input[value='Transfer']" }
+          ]
+        }
+      },
+      "rationale": "The only irreversible step in this flow: money moves. Everything before it fills a form and can be abandoned safely, which is why the risk classification sits on this step rather than on the capability."
+    },
+    {
+      "id": "await_confirmation",
+      "action": {
+        "action": "wait",
+        "condition": { "kind": "text", "value": "Transfer Complete!" },
+        "timeoutMs": 15000
+      }
+    },
+    {
+      "id": "read_amount",
+      "action": {
+        "action": "extract",
+        "as": "resultAmount",
+        "target": { "candidates": [{ "strategy": "css", "value": "#amountResult" }] }
+      }
+    },
+    {
+      "id": "read_from",
+      "action": {
+        "action": "extract",
+        "as": "resultFrom",
+        "target": { "candidates": [{ "strategy": "css", "value": "#fromAccountIdResult" }] }
+      }
+    },
+    {
+      "id": "read_to",
+      "action": {
+        "action": "extract",
+        "as": "resultTo",
+        "target": { "candidates": [{ "strategy": "css", "value": "#toAccountIdResult" }] }
+      }
+    }
+  ],
+  "handlers": [
+    {
+      "id": "validation_error",
+      "match": { "kind": "text", "value": "Please enter a valid amount" },
+      "scope": ["await_confirmation"],
+      "disposition": {
+        "kind": "business_outcome",
+        "outcome": "invalid_amount",
+        "detail": { "requestedAmount": "{{inputs.amount}}" }
+      },
+      "note": "A rejected amount is the application answering, not the automation failing."
+    },
+    {
+      "id": "insufficient_funds",
+      "match": { "kind": "text", "value": "insufficient funds" },
+      "scope": "global",
+      "disposition": { "kind": "business_outcome", "outcome": "insufficient_funds" }
+    },
+    {
+      "id": "internal_error",
+      "match": { "kind": "text", "value": "An internal error has occurred" },
+      "scope": "global",
+      "disposition": { "kind": "fail", "code": "APP_ERROR" }
+    }
+  ],
+  "checkpoint": {
+    "kind": "all",
+    "conditions": [
+      { "kind": "text", "value": "Transfer Complete!" },
+      { "kind": "not", "condition": { "kind": "text", "value": "Could not find account" } }
+    ]
+  }
+}

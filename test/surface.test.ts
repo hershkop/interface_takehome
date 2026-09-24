@@ -144,3 +144,147 @@ describe("describeCondition", () => {
     ).toBe('title containing "Overview" AND NOT (text "Error")');
   });
 });
+
+describe("human event capture (PR5)", () => {
+  it("keeps recording after a navigation, and never records typed values", async () => {
+    // Two properties, both easy to get wrong.
+    //
+    // Listeners attached with a one-off evaluate() die on the next navigation, so a person who
+    // clicks anything that loads a page is recorded for the first click and then silently not
+    // at all — the worst kind of failure in an audit trail, because it looks like they did
+    // nothing. addInitScript re-runs per document.
+    //
+    // And what someone types into a bank's back office must not be persisted. The payload
+    // carries a length, never the characters.
+    const { PlaywrightSurface } = await import("../src/surface.js");
+    const events: Array<Record<string, unknown>> = [];
+
+    const surface = await PlaywrightSurface.launch({
+      onHumanEvent: (e) => events.push({ ...e }),
+    });
+
+    try {
+      const page = surface.page;
+      const html = (label: string) =>
+        `data:text/html,<body><button id="b">${label}</button>` +
+        `<input id="pw" type="password"></body>`;
+
+      await page.goto(html("first"));
+      await page.click("#b");
+      await page.fill("#pw", "sup3r-s3cret-value");
+      await page.dispatchEvent("#pw", "change");
+
+      // Navigate: a one-off listener injection would stop reporting here.
+      await page.goto(html("second"));
+      await page.click("#b");
+
+      await page.waitForTimeout(150);
+
+      const clicks = events.filter((e) => e.type === "click");
+      expect(clicks.length).toBeGreaterThanOrEqual(2);
+
+      const serialised = JSON.stringify(events);
+      expect(serialised).not.toContain("sup3r-s3cret-value");
+
+      const changes = events.filter((e) => e.type === "change");
+      expect(changes.length).toBeGreaterThan(0);
+      expect(changes[0]?.valueLength).toBe("sup3r-s3cret-value".length);
+      expect(changes[0]?.id).toBe("pw");
+    } finally {
+      await surface.close();
+    }
+  }, 60_000);
+});
+
+describe("human event capture — review regressions (PR5)", () => {
+  const launchCapturing = async () => {
+    const { PlaywrightSurface } = await import("../src/surface.js");
+    const events: Array<Record<string, unknown>> = [];
+    const surface = await PlaywrightSurface.launch({ onHumanEvent: (e) => events.push({ ...e }) });
+    return { surface, events };
+  };
+
+  it("never copies typed content out of a contenteditable (review #2)", async () => {
+    // textContent is the label on a <button> and exactly what an auditor wants. On a
+    // contenteditable it IS what the person typed, and the redactor cannot recognise arbitrary
+    // typed text — so it would have been persisted verbatim into both evidence files.
+    const { surface, events } = await launchCapturing();
+    try {
+      const page = surface.page;
+      await page.goto(
+        "data:text/html,<body>" +
+          '<div id="notes" contenteditable="true" role="textbox" aria-label="Case notes"></div>' +
+          "<button id='b'>Approve Transfer</button></body>",
+      );
+
+      await page.click("#notes");
+      await page.type("#notes", "account 12345 belongs to Jane Doe, SSN on file");
+      await page.click("#b");
+      await page.waitForTimeout(250);
+
+      const serialised = JSON.stringify(events);
+      expect(serialised).not.toContain("Jane Doe");
+      expect(serialised).not.toContain("SSN on file");
+      expect(serialised).not.toContain("12345");
+
+      // The stable label survives, and so does the length.
+      expect(serialised).toContain("Case notes");
+      const edits = events.filter((e) => e.id === "notes" && typeof e.valueLength === "number");
+      expect(edits.length).toBeGreaterThan(0);
+
+      // A non-editable control still contributes its label, which is the useful half.
+      expect(events.some((e) => e.name === "Approve Transfer")).toBe(true);
+    } finally {
+      await surface.close();
+    }
+  }, 60_000);
+
+  it("captures an edit that never blurs (review #4)", async () => {
+    // Only click/change/submit were registered, so a field edited and then submitted — or left
+    // when the page navigated — produced no change event and vanished from the audit trail.
+    const { surface, events } = await launchCapturing();
+    try {
+      const page = surface.page;
+      await page.goto("data:text/html,<body><input id='amt'></body>");
+      await page.type("#amt", "2500");
+      // Deliberately no blur, no change event.
+      await page.waitForTimeout(600);
+
+      const inputs = events.filter((e) => e.type === "input" && e.id === "amt");
+      expect(inputs.length).toBeGreaterThan(0);
+      expect(JSON.stringify(events)).not.toContain("2500");
+    } finally {
+      await surface.close();
+    }
+  }, 60_000);
+
+  it("coalesces typing rather than emitting one event per keystroke", async () => {
+    const { surface, events } = await launchCapturing();
+    try {
+      const page = surface.page;
+      await page.goto("data:text/html,<body><input id='amt'></body>");
+      await page.type("#amt", "123456789012345", { delay: 5 });
+      await page.waitForTimeout(300);
+
+      const inputs = events.filter((e) => e.type === "input");
+      // 15 keystrokes; an uncoalesced listener would emit 15 events.
+      expect(inputs.length).toBeLessThan(8);
+      expect(inputs.length).toBeGreaterThan(0);
+    } finally {
+      await surface.close();
+    }
+  }, 60_000);
+
+  it("records navigation, which a page being torn down cannot report itself (review #4)", async () => {
+    const { surface, events } = await launchCapturing();
+    try {
+      await surface.page.goto("data:text/html,<body><p>one</p></body>");
+      await surface.page.goto("data:text/html,<body><p>two</p></body>");
+      await surface.page.waitForTimeout(150);
+
+      expect(events.filter((e) => e.type === "navigate").length).toBeGreaterThanOrEqual(2);
+    } finally {
+      await surface.close();
+    }
+  }, 60_000);
+});

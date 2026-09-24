@@ -9,8 +9,8 @@ Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking de
 stand-in for the back-office systems this is really aimed at. Design rationale is in
 [PLAN.md](PLAN.md); the assignment write-up will be in `REPORT.md`.
 
-> **Status — PR 4 of 6.** Deterministic replay under policy enforcement. Human handoff and
-> LLM discovery land in later PRs.
+> **Status — PR 5 of 6.** Deterministic replay under policy, with a real human handoff. LLM
+> discovery lands in PR6.
 
 ## Setup
 
@@ -108,6 +108,103 @@ npm run cli -- replay capabilities/lookup_account_balance.v1.json \
 #     action type "fill" is blocked by policy
 #     at step 1: enter_username
 ```
+
+## Demo — a step that needs a human
+
+`transfer_funds` moves money. Every step before the submit fills a form and can be abandoned
+safely; the submit is irreversible, so it alone is classified `approval_required`.
+
+```bash
+# Unattended: the caller gets `escalated`, not a guess and not a failure
+npm run cli -- replay capabilities/transfer_funds.v1.json \
+  --input fromAccount=12345 --input toAccount=12678 --input amount=25
+#   ESCALATED  approval_required
+#     intervention : replay-…-submit_transfer
+#     resume token : replay-…:9
+
+# With an operator: the live browser is handed over
+npm run cli -- replay capabilities/transfer_funds.v1.json \
+  --input fromAccount=12345 --input toAccount=12678 --input amount=25 \
+  --interactive --headed --goal "move 25 dollars between demo accounts"
+```
+
+```
+  ┌────────────────────────────────────────────────────────────────
+  │ HUMAN INTERVENTION REQUIRED
+  ├────────────────────────────────────────────────────────────────
+  │ why        : approval_required
+  │ Step "submit_transfer" is classified approval_required and needs a person.
+  │ capability : transfer_funds
+  │ step       : 9 "submit_transfer"
+  │ page       : ParaBank | Transfer Funds
+  │ url        : http://localhost:18080/parabank/transfer.htm
+  │ screenshot : evidence/replay-…/001-intervention-submit_transfer.png
+  ├────────────────────────────────────────────────────────────────
+  │ The browser window is yours. Automation is locked out until you
+  │ hand it back.
+  │
+  │   [d]one     you performed the step yourself; skip it and continue
+  │   [p]roceed  you approve; automation performs the step
+  │   [a]bort    stop the run
+  └────────────────────────────────────────────────────────────────
+```
+
+## Escalation and control transfer
+
+### The decision is three-valued, not approve/deny
+
+A person who takes over a live session usually does not merely *authorise* the step — they
+perform it, with judgement the automation did not have. Collapsing that into "approved" makes
+automation redo work the person already did, which on a funds transfer means transferring
+twice. So `done` skips the step and verifies where the session ended up; `proceed` has
+automation perform it; anything unclear, including an empty answer, aborts — on an irreversible
+financial action the safe reading of "no clear answer" is not to do it.
+
+### The ownership lock is what makes it a handoff
+
+Exactly one party may act at a time, and the other is *structurally* unable to. `OwnedSurface`
+wraps the session and refuses every mutating action while a human holds it — wrapped **outside**
+the policy guard, so ownership is decided first: if a person is driving, no question about what
+policy would have permitted is even asked.
+
+If automation could still click while someone is typing into the same form, control was never
+transferred; the request would just be a message. Reads stay available, because the engine has
+to observe in order to take the session back sensibly.
+
+Ownership changes **before** the request is routed, and the resumed state is captured **while
+the human still holds it** — a person finishing up is still clicking, and automation must not be
+eligible to act until the engine has seen where the page ended up. Only then does control
+return, and it returns even if the operator channel throws, because a crashed console must not
+leave a session permanently locked.
+
+### What the human did is recorded, without what they typed
+
+Listeners are installed with `page.addInitScript`, so they re-attach on every document. A
+one-off injection dies at the first navigation, and an audit trail that silently stops recording
+looks exactly like a person who did nothing.
+
+Each event carries the field's identity and the **length** of what was entered, never the
+characters. Reading a label off the element is safe for a `<button>Transfer</button>` and is
+exactly what an auditor wants — but on a `contenteditable` that text *is* what the person typed,
+so nothing editable contributes its content, only its stable attributes and a length.
+
+`input` is captured as well as `change`, coalesced so typing does not emit one event per
+keystroke: an edit that never blurs — because the operator submits, or the page navigates —
+fires no `change` and would otherwise vanish. Navigation is reported from the driver side,
+since a document being torn down cannot announce its own departure.
+
+Written to `human-actions.json`, separate from the event log, because "what did a person do to
+this institution's data" is a different question from "what did the system do".
+
+### What is a stand-in, and what is not
+
+The CLI operator surface is openly minimal — a real deployment routes to a queue and streams
+the session to a remote console. Swapping `CliInterventionChannel` for a queue consumer changes
+no other file.
+
+What is *not* a stand-in: ownership genuinely transfers on the same live session, the request
+carries enough context to act on, the lock is enforced rather than advised, the human's actions
+are recorded, and control comes back with a fresh observation.
 
 Exit codes let a calling agent branch without parsing output: `0` success **or** business
 outcome, `2` escalated, `1` failure. A business outcome is not an error.

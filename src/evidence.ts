@@ -62,6 +62,7 @@ export class EvidenceRecorder {
   private modelCalls = 0;
   private tracePath: string | undefined;
   private failureSnapshotPath: string | undefined;
+  private humanActionsPath: string | undefined;
   private screenshotSeq = 0;
   private ready: Promise<void>;
 
@@ -169,6 +170,7 @@ export class EvidenceRecorder {
       traceUnredacted: this.tracePath !== undefined,
       screenshots: [...this.screenshots],
       failureSnapshot: this.failureSnapshotPath,
+      ...(this.humanActionsPath ? { humanActions: this.humanActionsPath } : {}),
       modelCalls: this.modelCalls,
     };
   }
@@ -182,6 +184,23 @@ export class EvidenceRecorder {
       "utf8",
     );
     return result.evidence;
+  }
+
+  /**
+   * What the human did while they held the session, as its own file.
+   *
+   * Separate from the event log because it answers a different question. The event log is "what
+   * did the system do"; this is "what did a person do to this institution's data, and when".
+   * An auditor asking the second question should not have to grep the first.
+   */
+  async writeHumanActions(actions: readonly unknown[]): Promise<void> {
+    await this.ready;
+    await writeFile(
+      join(this.directory, "human-actions.json"),
+      `${JSON.stringify(redactDeep({ count: actions.length, actions }, this.redact), null, 2)}\n`,
+      "utf8",
+    );
+    this.humanActionsPath = join(this.directory, "human-actions.json");
   }
 
   /** Run-level metadata, written once at the start so a crashed run still leaves a trail. */

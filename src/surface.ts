@@ -205,6 +205,22 @@ export interface PlaywrightSurfaceOptions {
    * URL, the browser would already have fetched it.
    */
   navigationAllowed?: (url: string) => boolean;
+  /**
+   * Called for every user interaction in the page, so a human's actions during a handoff can be
+   * recorded. Values are never included — see the payload assembled in `installHumanEventCapture`.
+   */
+  onHumanEvent?: (event: RawHumanEvent) => void;
+}
+
+/** Shape emitted by the in-page listeners. Deliberately free of typed content. */
+export interface RawHumanEvent {
+  type: "click" | "input" | "change" | "submit" | "navigate";
+  url: string;
+  tag?: string;
+  role?: string;
+  name?: string;
+  id?: string;
+  valueLength?: number;
 }
 
 export class PlaywrightSurface implements Surface {
@@ -229,6 +245,25 @@ export class PlaywrightSurface implements Surface {
       ...(options.executablePath ? { executablePath: options.executablePath } : {}),
     });
     const context = await browser.newContext();
+    if (options.onHumanEvent) {
+      await installHumanEventCapture(context, options.onHumanEvent);
+    }
+
+    // Navigation is reported from here rather than in-page: a document being torn down cannot
+    // reliably announce its own departure, and an operator who navigates away mid-handoff is a
+    // material part of the audit trail. Automation's own navigations fire this too and are
+    // filtered out by the ownership check in the sink.
+    const reportNavigation = options.onHumanEvent;
+    if (reportNavigation) {
+      context.on("page", (opened) => {
+        opened.on("framenavigated", (frame) => {
+          if (frame.parentFrame() === null) {
+            reportNavigation({ type: "navigate", url: frame.url() });
+          }
+        });
+      });
+    }
+
     const blockedNavigations: string[] = [];
     if (options.navigationAllowed) {
       const allowed = options.navigationAllowed;
@@ -435,6 +470,99 @@ export class PlaywrightSurface implements Surface {
     await this.browser.close().catch(() => {});
     return tracePath;
   }
+}
+
+
+/**
+ * Installs in-page listeners that report user interactions.
+ *
+ * Two details decide whether this works at all.
+ *
+ * `addInitScript` rather than a one-off `evaluate`: listeners attached to a live document die
+ * on the next navigation. A human who clicks anything that loads a page would be recorded for
+ * the first click and then silently not at all — the worst kind of failure in an audit trail,
+ * because it looks like the person did nothing.
+ *
+ * The payload carries a value's LENGTH and never its content. What someone types into a bank's
+ * back office is precisely the data that must not be persisted, and a field's identity plus the
+ * fact that it was filled is what an auditor actually needs.
+ */
+async function installHumanEventCapture(
+  context: BrowserContext,
+  sink: (event: RawHumanEvent) => void,
+): Promise<void> {
+  const BINDING = "__recordHumanEvent__";
+
+  await context.exposeBinding(BINDING, (_source, payload) => {
+    sink(payload as RawHumanEvent);
+  });
+
+  await context.addInitScript(
+    ({ binding }) => {
+      /** Last time each element reported an edit, so typing does not emit per keystroke. */
+      const lastInput = new WeakMap<Element, number>();
+      const INPUT_COALESCE_MS = 400;
+
+      const report = (type: string, target: EventTarget | null): void => {
+        const el = target as HTMLElement | null;
+        if (!el || typeof el.tagName !== "string") return;
+
+        const fn = (window as unknown as Record<string, unknown>)[binding];
+        if (typeof fn !== "function") return;
+
+        const tag = el.tagName.toLowerCase();
+        const input = el as HTMLInputElement;
+        const hasValue = typeof input.value === "string";
+
+        // An element the user can type into must never contribute its content to the record.
+        // For a <button>Transfer</button>, textContent is the label and is exactly what an
+        // auditor wants. For a contenteditable div it IS what the person typed — and the
+        // redactor cannot recognise arbitrary typed text, so it would be persisted verbatim
+        // into both the event log and the human-actions file.
+        const editable =
+          el.isContentEditable || tag === "input" || tag === "textarea" || tag === "select";
+
+        // Length only, never the characters. contenteditable has no .value, so its length
+        // comes from its text — the length is safe, the text is not.
+        const valueLength = hasValue
+          ? input.value.length
+          : el.isContentEditable
+            ? (el.textContent ?? "").length
+            : undefined;
+
+        if (type === "input") {
+          const now = Date.now();
+          const previous = lastInput.get(el) ?? 0;
+          if (now - previous < INPUT_COALESCE_MS) return;
+          lastInput.set(el, now);
+        }
+
+        (fn as (p: unknown) => void)({
+          type,
+          url: location.href,
+          tag,
+          role: el.getAttribute("role") ?? undefined,
+          // Stable identifiers first. A label is only read off the element when nobody can
+          // type into it.
+          name:
+            el.getAttribute("aria-label") ??
+            el.getAttribute("name") ??
+            (editable ? undefined : (el.textContent ?? "").trim().slice(0, 60) || undefined),
+          id: el.id || undefined,
+          valueLength,
+        });
+      };
+
+      document.addEventListener("click", (e) => report("click", e.target), true);
+      // `input` as well as `change`: an edit that never blurs — because the operator submits, or
+      // the page navigates — fires no change event and would vanish from the audit trail
+      // entirely. Coalesced above so typing does not emit one event per keystroke.
+      document.addEventListener("input", (e) => report("input", e.target), true);
+      document.addEventListener("change", (e) => report("change", e.target), true);
+      document.addEventListener("submit", (e) => report("submit", e.target), true);
+    },
+    { binding: BINDING },
+  );
 }
 
 function message(err: unknown): string {
