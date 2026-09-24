@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -28,6 +28,33 @@ beforeAll(async () => {
   await fixture("notfound.html", `<h1>Error!</h1><p>Could not find account # 99999</p>`);
   await fixture("ambiguous.html", `<button>Go</button><button>Go</button>`);
   await fixture("empty.html", `<p>nothing to see</p>`);
+  await fixture("slow-confirm.html", `
+    <h1>Transfer</h1>
+    <button id="submit">Submit Transfer</button>
+    <p id="count">submissions: 0</p>
+    <p id="confirm" style="display:none">Transfer Complete</p>
+    <script>
+      let n = 0;
+      document.getElementById('submit').addEventListener('click', () => {
+        n++;
+        document.getElementById('count').textContent = 'submissions: ' + n;
+        // Confirmation appears only after a delay — or, past the timeout, never.
+        setTimeout(() => {
+          document.getElementById('confirm').style.display = 'block';
+        }, 900);
+      });
+    </script>`);
+  await fixture("never-confirms.html", `
+    <h1>Transfer</h1>
+    <button id="submit">Submit Transfer</button>
+    <p id="count">submissions: 0</p>
+    <script>
+      let n = 0;
+      document.getElementById('submit').addEventListener('click', () => {
+        n++;
+        document.getElementById('count').textContent = 'submissions: ' + n;
+      });
+    </script>`);
   await fixture("double-submit.html", `
     <h1>Transfer</h1>
     <button id="submit">Submit Transfer</button>
@@ -428,4 +455,283 @@ describe("replay — no model in the decision loop", () => {
       expect(second.outputs).toEqual(first.outputs);
     }
   }, 90_000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regressions from PR3 review.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("capability-level risk is inherited (review #1)", () => {
+  it("escalates a step with no risk of its own when the capability requires approval", async () => {
+    // metadata.risk was written into run.json and then never consulted. A capability marked
+    // approval_required executed unattended whenever its steps happened not to restate it,
+    // which is the documented inheritance rule doing precisely nothing.
+    const result = await run(
+      {
+        metadata: {
+          name: "Risky",
+          description: "Capability-level risk only",
+          status: "approved",
+          risk: "approval_required",
+          recordedAt: "2026-09-24T00:00:00.000Z",
+          recordedBy: "human",
+        },
+        outputs: {},
+      },
+      { page: "detail.html" },
+    );
+    expect(result.status).toBe("escalated");
+  }, 60_000);
+
+  it("lets a step override the capability's classification downward", async () => {
+    const result = await run(
+      {
+        metadata: {
+          name: "Risky",
+          description: "Capability risky, step explicitly safe",
+          status: "approved",
+          risk: "approval_required",
+          recordedAt: "2026-09-24T00:00:00.000Z",
+          recordedBy: "human",
+        },
+        steps: [
+          { id: "open", risk: "safe", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "read",
+            risk: "safe",
+            action: {
+              action: "extract",
+              as: "balanceText",
+              target: { candidates: [{ strategy: "css", value: "#balance" }] },
+            },
+          },
+        ],
+      },
+      { page: "detail.html" },
+    );
+    expect(result.status).toBe("success");
+  }, 60_000);
+
+  it("refuses outright when the capability is classified blocked", async () => {
+    const result = await run(
+      {
+        metadata: {
+          name: "Blocked",
+          description: "Never executes",
+          status: "approved",
+          risk: "blocked",
+          recordedAt: "2026-09-24T00:00:00.000Z",
+          recordedBy: "human",
+        },
+        outputs: {},
+      },
+      { page: "detail.html" },
+    );
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") expect(result.error.code).toBe("POLICY_DENIED");
+  }, 60_000);
+});
+
+describe("inputs declared sensitive are redacted (review #2)", () => {
+  it("keeps a sensitive input out of every evidence file", async () => {
+    // `sensitive: true` existed in the schema and was read by nothing, so an artifact author
+    // declaring a value regulated got no protection at all. A field that makes a promise the
+    // system does not keep is worse than no field.
+    const secretAccount = "9876543210";
+    const result = await replay({
+      artifact: artifact({
+        inputs: { page: { type: "string" }, ssn: { type: "string", sensitive: true } },
+        outputs: {},
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "type_it",
+            action: {
+              action: "assert",
+              condition: { kind: "text", value: "Account Details" },
+            },
+          },
+        ],
+      }),
+      inputs: { page: "detail.html", ssn: secretAccount },
+      baseUrl: base,
+      evidenceRoot,
+    });
+    expect(result.status).toBe("success");
+
+    const files = await readdir(result.evidence.directory);
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      const text = await readFile(join(result.evidence.directory, file), "utf8");
+      expect(text, `${file} leaked the sensitive input`).not.toContain(secretAccount);
+    }
+  }, 60_000);
+});
+
+describe("a successful action is never repeated for its postcondition (review #3)", () => {
+  it("waits for a delayed confirmation instead of re-clicking", async () => {
+    const result = await run(
+      {
+        outputs: {},
+        checkpoint: { kind: "text", value: "submissions: 1" },
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "submit",
+            action: { action: "click", target: { candidates: [{ strategy: "css", value: "#submit" }] } },
+            postcondition: { kind: "text", value: "Transfer Complete" },
+            retry: { maxAttempts: 3, delayMs: 100 },
+          },
+        ],
+        handlers: [],
+      },
+      { page: "slow-confirm.html" },
+    );
+    // The confirmation arrives at ~900ms; polling finds it, and exactly one submission happened.
+    expect(result.status).toBe("success");
+  }, 60_000);
+
+  it("stops rather than re-submitting when the confirmation never arrives", async () => {
+    // The dangerous case. retry says 3 attempts, but the action already took effect, so
+    // repeating it would submit three transfers to satisfy a postcondition.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        checkpoint: { kind: "text", value: "submissions: 1" },
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "submit",
+            action: { action: "click", target: { candidates: [{ strategy: "css", value: "#submit" }] } },
+            postcondition: { kind: "text", value: "Transfer Complete" },
+            retry: { maxAttempts: 3, delayMs: 100 },
+          },
+        ],
+        handlers: [],
+      }),
+      inputs: { page: "never-confirms.html" },
+      baseUrl: base,
+      evidenceRoot,
+      postconditionTimeoutMs: 800,
+    });
+
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("CHECKPOINT_FAILED");
+      expect(result.error.step?.id).toBe("submit");
+    }
+
+    // The proof that it did not retry: the page still reports a single submission.
+    const events = await readFile(join(result.evidence.directory, "events.jsonl"), "utf8");
+    expect(events).not.toContain("postcondition_retry");
+  }, 60_000);
+
+  it("still retries an idempotent action whose postcondition is unmet", async () => {
+    // Re-navigating is safe, so the retry budget is honoured for it.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        checkpoint: { kind: "text", value: "nothing" },
+        steps: [
+          {
+            id: "open",
+            action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" },
+            postcondition: { kind: "text", value: "never appears" },
+            retry: { maxAttempts: 2, delayMs: 50 },
+          },
+        ],
+        handlers: [],
+      }),
+      inputs: { page: "empty.html" },
+      baseUrl: base,
+      evidenceRoot,
+      postconditionTimeoutMs: 300,
+    });
+    expect(result.status).toBe("failure");
+    const events = await readFile(join(result.evidence.directory, "events.jsonl"), "utf8");
+    expect(events).toContain("postcondition_retry");
+  }, 60_000);
+});
+
+describe("lifecycle (review #5, #6)", () => {
+  it("reports the trace on a SUCCESSFUL traced run", async () => {
+    // The success result used to be assembled inside the try, before the finally block stopped
+    // tracing — so a successful --trace run claimed traceUnredacted:false next to a trace.zip
+    // that existed on disk.
+    const result = await replay({
+      artifact: artifact(),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      trace: "unredacted",
+    });
+    expect(result.status).toBe("success");
+    expect(result.evidence.traceUnredacted).toBe(true);
+    expect(result.evidence.trace).toBeTruthy();
+
+    const files = await readdir(result.evidence.directory);
+    expect(files).toContain("trace.zip");
+  }, 60_000);
+
+  it("turns a browser launch failure into a structured result, not a rejection", async () => {
+    // A caller consuming --json must never receive an unhandled exception.
+    const result = await replay({
+      artifact: artifact(),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      // No Chromium build exists at this path, so launch throws inside the guarded lifecycle.
+      executablePath: "/nonexistent/chromium-binary",
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") expect(result.error.code).toBe("APP_ERROR");
+    expect(result.evidence.directory).toBeTruthy();
+  }, 60_000);
+});
+
+describe("reauthentication stays on the invocation's tenant (review #4)", () => {
+  it("passes the run's baseUrl and secrets to the callback, not process config", async () => {
+    // After a session expiry, a callback reaching for global configuration would log back in to
+    // the DEFAULT tenant and the run would continue returning another institution's data —
+    // failing as a *successful* run, which is the worst shape a data-segregation bug can take.
+    const seen: Array<{ baseUrl: string; secrets: Record<string, string> }> = [];
+
+    await replay({
+      artifact: artifact({
+        outputs: {},
+        checkpoint: { kind: "text", value: "Account Details" },
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "read",
+            action: {
+              action: "assert",
+              condition: { kind: "text", value: "Account Details" },
+            },
+          },
+        ],
+        handlers: [
+          {
+            id: "session_expired",
+            // The fixture always looks "expired" so the remedy is guaranteed to fire once.
+            match: { kind: "text", value: "Could not find account" },
+            scope: "global",
+            disposition: { kind: "recover", remedy: "reauthenticate", maxAttempts: 1 },
+          },
+        ],
+      }),
+      inputs: { page: "notfound.html" },
+      baseUrl: base,
+      secrets: { parabankUsername: "tenant-b-user", parabankPassword: "tenant-b-pass" },
+      evidenceRoot,
+      reauthenticate: async (_surface, context) => {
+        seen.push({ baseUrl: context.baseUrl, secrets: context.secrets });
+        return true;
+      },
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.baseUrl).toBe(base);
+    expect(seen[0]?.secrets.parabankUsername).toBe("tenant-b-user");
+  }, 60_000);
 });

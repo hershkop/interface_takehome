@@ -26,6 +26,7 @@ import {
   type ErrorCode,
   type Handler,
   type OutputDefinition,
+  type RiskClass,
   type RunError,
   type RunResult,
 } from "./schema.js";
@@ -51,6 +52,10 @@ export interface ReplayOptions {
   trace?: "off" | "unredacted";
   evidenceRoot?: string;
   stepTimeoutMs?: number;
+  /** How long a step's postcondition is polled for before it counts as unmet. */
+  postconditionTimeoutMs?: number;
+  /** Point at a specific Chromium build. */
+  executablePath?: string;
   /**
    * Supplied by the handoff layer in PR5. Until then, a step that needs approval returns
    * `escalated` rather than pretending it could proceed.
@@ -61,7 +66,15 @@ export interface ReplayOptions {
    * differs per application, so the engine does not invent one — an artifact that declares the
    * remedy without a provider fails loudly instead of silently continuing logged out.
    */
-  reauthenticate?: (surface: PlaywrightSurface) => Promise<boolean>;
+  reauthenticate?: (
+    surface: PlaywrightSurface,
+    /**
+     * Invocation-scoped, not process-scoped. A callback that reached for global configuration
+     * would re-authenticate against the DEFAULT tenant after a session expiry, and the run
+     * would then continue — silently — against the wrong institution's data.
+     */
+    context: { baseUrl: string; secrets: Record<string, string> },
+  ) => Promise<boolean>;
 }
 
 /** Everything the engine needs while a run is in flight. */
@@ -74,6 +87,10 @@ interface RunContext {
   options: ReplayOptions;
   /** Per-handler recovery attempts, so a cap is enforced across the whole run. */
   recoveryAttempts: Map<string, number>;
+  /** Inherited by any step that does not declare its own risk. */
+  capabilityRisk: RiskClass;
+  /** How long a postcondition is polled before it is treated as unmet. */
+  postconditionTimeoutMs: number;
 }
 
 type StepDisposition =
@@ -93,7 +110,10 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
   // milliseconds and produce a precise message, not a timeout three steps into a live session.
   const parsed = CapabilityArtifact.safeParse(options.artifact);
   if (!parsed.success) {
-    return earlyFailure("ARTIFACT_INVALID", parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
+    return earlyFailure(
+      "ARTIFACT_INVALID",
+      parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+    );
   }
   const artifact = parsed.data;
 
@@ -104,11 +124,25 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
   const missingSecret = missingSecretReference(artifact, secrets);
   if (missingSecret) return earlyFailure("INPUT_INVALID", missingSecret);
 
-  // ── Redaction is configured from the secrets themselves ─────────────────────
+  // ── Redaction is configured from secrets AND from inputs declared sensitive ──
+  //
+  // Secrets are matched by key name, because "username" is not worth scrubbing. Inputs are
+  // matched by DECLARATION: an artifact author who writes `sensitive: true` has said this value
+  // is regulated, and that statement has to actually do something — otherwise the field is a
+  // promise the system does not keep, which is worse than not offering it.
+  const sensitiveInputValues = Object.entries(artifact.inputs)
+    .filter(([, definition]) => definition.sensitive)
+    .map(([name]) => inputs.values[name])
+    .filter((value): value is string | number => value !== undefined && value !== null)
+    .map(String);
+
   const redact = createRedactor({
-    literals: Object.entries(secrets)
-      .filter(([key]) => isSensitiveSecretKey(key))
-      .map(([, value]) => value),
+    literals: [
+      ...Object.entries(secrets)
+        .filter(([key]) => isSensitiveSecretKey(key))
+        .map(([, value]) => value),
+      ...sensitiveInputValues,
+    ],
   });
 
   const runId = newRunId("replay");
@@ -130,41 +164,54 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
     startedAt: new Date().toISOString(),
   });
 
-  const surface = await PlaywrightSurface.launch({
-    ...(options.headed === undefined ? {} : { headed: options.headed }),
-    trace: options.trace ?? "off",
-    traceDir: recorder.directory,
-    defaultTimeoutMs: options.stepTimeoutMs ?? 10_000,
-  });
-
-  const context: RunContext = {
-    surface,
-    recorder,
-    redact,
-    scope: { baseUrl, inputs: inputs.values, secrets, vars: {} },
-    stepTimeoutMs: options.stepTimeoutMs ?? 10_000,
-    options,
-    recoveryAttempts: new Map(),
-  };
-
+  let surface: PlaywrightSurface | undefined;
   let terminal: TerminalOutcome | undefined;
+  let outputs: Record<string, unknown> | undefined;
 
   try {
+    // Launching is inside the guarded lifecycle. A missing browser binary or a failed context
+    // is exactly the kind of thing a caller consuming --json must receive as a structured
+    // failure, not as an unhandled rejection.
+    surface = await PlaywrightSurface.launch({
+      ...(options.headed === undefined ? {} : { headed: options.headed }),
+      trace: options.trace ?? "off",
+      traceDir: recorder.directory,
+      defaultTimeoutMs: options.stepTimeoutMs ?? 10_000,
+      ...(options.executablePath ? { executablePath: options.executablePath } : {}),
+    });
+
+    const context: RunContext = {
+      surface,
+      recorder,
+      redact,
+      scope: { baseUrl, inputs: inputs.values, secrets, vars: {} },
+      stepTimeoutMs: options.stepTimeoutMs ?? 10_000,
+      options,
+      recoveryAttempts: new Map(),
+      postconditionTimeoutMs: options.postconditionTimeoutMs ?? 10_000,
+      // Steps inherit the capability's classification unless they override it. Without this,
+      // a capability marked approval_required executed unattended whenever its steps happened
+      // not to restate the risk — which is the documented inheritance rule doing nothing.
+      capabilityRisk: artifact.metadata.risk,
+    };
+
     terminal = await runSteps(artifact.steps, artifact.handlers, context);
 
     if (!terminal) {
       // Outputs are read before the checkpoint, so a failed checkpoint can still report what
       // the page actually said — which is usually the thing that explains the failure.
-      const outputs = await collectOutputs(artifact.outputs, context);
-      if ("error" in outputs) {
-        terminal = { kind: "failure", error: outputs.error };
+      const collected = await collectOutputs(artifact.outputs, context);
+      if ("error" in collected) {
+        terminal = { kind: "failure", error: collected.error };
       } else {
         const ok = await context.surface.verify(artifact.checkpoint);
         await recorder.event({
           type: ok ? "checkpoint.ok" : "checkpoint.failed",
           detail: { condition: describeCondition(artifact.checkpoint) },
         });
-        if (!ok) {
+        if (ok) {
+          outputs = collected.values;
+        } else {
           await captureFailureContext(context, "checkpoint");
           terminal = {
             kind: "failure",
@@ -177,17 +224,10 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
               attempts: 1,
             },
           };
-        } else {
-          return await finish(recorder, {
-            status: "success",
-            outputs: outputs.values,
-            evidence: recorder.summary(),
-          });
         }
       }
     }
   } catch (err) {
-    await captureFailureContext(context, "unexpected");
     terminal = {
       kind: "failure",
       error: {
@@ -198,11 +238,35 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       },
     };
   } finally {
-    const trace = await surface.close();
-    if (trace) recorder.setTrace(trace);
+    if (surface) {
+      const trace = await surface.close();
+      if (trace) recorder.setTrace(trace);
+    }
   }
 
-  return await finish(recorder, toRunResult(terminal, recorder));
+  // Every terminal result is assembled AFTER the surface is closed, so the evidence summary can
+  // see the trace that closing produced. Building the success result inside the try meant a
+  // successful --trace run reported traceUnredacted: false next to a trace.zip that existed.
+  const result: RunResult =
+    outputs !== undefined
+      ? { status: "success", outputs, evidence: recorder.summary() }
+      : toRunResult(terminal ?? unexpectedTerminal(), recorder);
+
+  await recorder.finish(result);
+  return result;
+}
+
+/** Defensive: `terminal` is set on every path that does not produce outputs. */
+function unexpectedTerminal(): TerminalOutcome {
+  return {
+    kind: "failure",
+    error: {
+      code: "APP_ERROR",
+      message: "run ended without producing a result",
+      recoverable: false,
+      attempts: 1,
+    },
+  };
 }
 
 // ─── Step execution ────────────────────────────────────────────────────────────
@@ -248,7 +312,23 @@ async function runSteps(
       if (outcome.ok) {
         const postcondition = await verifyPostcondition(step, index, context);
         if (postcondition) {
-          if (attempt < maxAttempts) {
+          // The action SUCCEEDED and its postcondition still did not hold.
+          //
+          // Re-running the action here is the same double-submit hazard the handler recovery
+          // path guards against: repeating a click that already submitted a funds transfer
+          // submits a second one. verifyPostcondition already polls, so a merely slow
+          // confirmation has been waited for by this point.
+          //
+          // Only actions that can be repeated without a side effect may be retried. For
+          // anything else the run stops and reports what was expected versus observed, which
+          // is the honest outcome — the application did something we cannot verify.
+          if (attempt < maxAttempts && isRepeatableAfterSuccess(step.action)) {
+            await context.recorder.event({
+              type: "step.postcondition_retry",
+              stepId: step.id,
+              stepIndex: index,
+              detail: { attempt, maxAttempts, actionType: step.action.action },
+            });
             await delay(step.retry?.delayMs ?? 500);
             continue;
           }
@@ -402,14 +482,40 @@ function fail(
   };
 }
 
+/**
+ * Whether an action can be performed a second time without doing anything a second time.
+ *
+ * Navigation, waiting, extraction and assertion are observations or re-entries; repeating them
+ * changes nothing that a caller would have to reconcile. `click`, `fill` and `select` can all
+ * fire application-side handlers — a click submits, a fill can trigger onChange — so none of
+ * them may be repeated once they have already succeeded.
+ */
+function isRepeatableAfterSuccess(action: ArtifactStep["action"]): boolean {
+  switch (action.action) {
+    case "navigate":
+    case "wait":
+    case "extract":
+    case "assert":
+      return true;
+    case "click":
+    case "fill":
+    case "select":
+      return false;
+  }
+}
+
 async function verifyPostcondition(
   step: ArtifactStep,
   index: number,
   context: RunContext,
 ): Promise<TerminalOutcome | undefined> {
   if (!step.postcondition) return undefined;
-  const ok = await context.surface.verify(step.postcondition);
-  if (ok) return undefined;
+
+  // Polled, not sampled. A confirmation screen that takes a moment to render is the normal
+  // case, and treating "not true yet" as "not true" was what pushed the engine toward
+  // re-clicking in the first place.
+  const settled = await context.surface.waitFor(step.postcondition, context.postconditionTimeoutMs);
+  if (settled.ok) return undefined;
 
   // A postcondition is what makes a click *verified* rather than assumed. Without it a step
   // that silently did nothing looks identical to one that worked.
@@ -554,7 +660,10 @@ async function applyRemedy(
       return true;
     case "reauthenticate": {
       if (!context.options.reauthenticate) return false;
-      return context.options.reauthenticate(context.surface);
+      return context.options.reauthenticate(context.surface, {
+        baseUrl: context.scope.baseUrl,
+        secrets: context.scope.secrets,
+      });
     }
   }
 }
@@ -582,7 +691,8 @@ async function checkApproval(
   index: number,
   context: RunContext,
 ): Promise<TerminalOutcome | undefined> {
-  const risk = step.risk;
+  // Documented rule: a step without its own classification inherits the capability's.
+  const risk = step.risk ?? context.capabilityRisk;
   if (risk !== "approval_required" && risk !== "blocked") return undefined;
 
   if (risk === "blocked") {

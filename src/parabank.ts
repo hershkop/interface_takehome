@@ -6,7 +6,6 @@
  * the routine lives here and is injected at the CLI edge, which is the layer that already knows
  * which application it is pointed at.
  */
-import { config } from "./config.js";
 import { Target } from "./schema.js";
 import type { PlaywrightSurface } from "./surface.js";
 
@@ -31,12 +30,28 @@ const loginButton = Target.parse({
   ],
 });
 
-export async function loginToParabank(surface: PlaywrightSurface): Promise<boolean> {
-  const navigated = await surface.navigate(`${config.parabank.baseUrl}/index.htm`);
+/**
+ * Re-authenticate against the tenant THIS RUN is pointed at.
+ *
+ * Everything here comes from the invocation, never from global configuration. Reading
+ * `config.parabank.baseUrl` would mean that a run started with `--base-url` pointing at tenant
+ * B, on hitting a session expiry, would log back in to tenant A and carry on returning the
+ * wrong institution's account data — a correctness and data-segregation failure that would look
+ * like a successful run.
+ */
+export async function loginToParabank(
+  surface: PlaywrightSurface,
+  context: { baseUrl: string; secrets: Record<string, string> },
+): Promise<boolean> {
+  const username = context.secrets.parabankUsername;
+  const password = context.secrets.parabankPassword;
+  if (!username || !password) return false;
+
+  const navigated = await surface.navigate(`${context.baseUrl}/index.htm`);
   if (!navigated.ok) return false;
 
-  if (!(await surface.fill(usernameField, config.parabank.username)).ok) return false;
-  if (!(await surface.fill(passwordField, config.parabank.password)).ok) return false;
+  if (!(await surface.fill(usernameField, username)).ok) return false;
+  if (!(await surface.fill(passwordField, password)).ok) return false;
   if (!(await surface.click(loginButton)).ok) return false;
 
   return surface.verify({ kind: "title", value: "Accounts Overview" });

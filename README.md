@@ -115,14 +115,20 @@ outcome, `2` escalated, `1` failure. A business outcome is not an error.
 | **Waits, never sleeps** | Every wait is on an observable condition with a bounded timeout |
 | **Verified, not assumed** | Postconditions prove a step did something; the final checkpoint proves the run reached the state it claims |
 
-### Recovery never re-runs completed work
+### Nothing that already succeeded is ever re-run
 
-A recovery matched *before* a step retries it — the step hasn't run. A recovery matched *after*
-a step that **succeeded** continues to the next step instead.
+Re-executing a click that already submitted a funds transfer submits a second one. There are
+two paths that could do that, and both are closed:
 
-That asymmetry is a safety property, not a style choice: re-running a click that already
-submitted a funds transfer submits a second one. `test/replay.test.ts` pins it with a fixture
-that counts submissions and raises an interstitial only after a successful submit.
+- **Recovery.** A handler matching *before* a step retries it — the step hasn't run. A handler
+  matching *after* a step that succeeded continues to the next step instead.
+- **Postconditions.** A postcondition is *polled*, so a slow confirmation is simply waited for.
+  If it still doesn't hold, only actions that can be repeated without a side effect
+  (`navigate`, `wait`, `extract`, `assert`) may be retried. A `click`, `fill` or `select` that
+  already succeeded stops the run and reports expected-vs-observed, because the application did
+  something we cannot verify — and guessing is worse than saying so.
+
+`test/replay.test.ts` pins both with fixtures that count submissions.
 
 `npm run probe` is a development harness, not the product CLI — `discover` and `replay` arrive
 with the engine. It exists so this layer can be exercised against the real application rather

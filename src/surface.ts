@@ -192,6 +192,8 @@ export interface PlaywrightSurfaceOptions {
    */
   trace?: "off" | "unredacted";
   defaultTimeoutMs?: number;
+  /** Point at a specific Chromium build (a system browser, or a pinned one in CI). */
+  executablePath?: string;
 }
 
 export class PlaywrightSurface implements Surface {
@@ -204,7 +206,10 @@ export class PlaywrightSurface implements Surface {
   ) {}
 
   static async launch(options: PlaywrightSurfaceOptions = {}): Promise<PlaywrightSurface> {
-    const browser = await chromium.launch({ headless: !options.headed });
+    const browser = await chromium.launch({
+      headless: !options.headed,
+      ...(options.executablePath ? { executablePath: options.executablePath } : {}),
+    });
     const context = await browser.newContext();
     const tracing = options.trace === "unredacted" && Boolean(options.traceDir);
     if (tracing) {
