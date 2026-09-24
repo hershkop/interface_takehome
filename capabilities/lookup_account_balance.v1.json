@@ -1,0 +1,287 @@
+{
+  "schemaVersion": "1.0",
+  "capabilityId": "lookup_account_balance",
+  "version": "1.0.0",
+  "metadata": {
+    "name": "Look up account balance",
+    "description": "Sign in to ParaBank and read the current balance and type of one account. Returns account_not_found when the account does not exist.",
+    "status": "approved",
+    "risk": "safe",
+    "recordedAt": "2026-09-24T00:00:00.000Z",
+    "recordedBy": "human"
+  },
+  "target": {
+    "app": "parabank",
+    "appFingerprint": "parasoft/parabank@sha256:8c08664c",
+    "baseUrl": "http://localhost:18080/parabank"
+  },
+  "inputs": {
+    "accountId": {
+      "type": "string",
+      "description": "The account number to read.",
+      "required": true,
+      "pattern": "^[0-9]{1,10}$"
+    }
+  },
+  "outputs": {
+    "accountId": {
+      "type": "string",
+      "description": "Account number as displayed on the detail screen.",
+      "source": {
+        "kind": "variable",
+        "name": "shownAccountId"
+      },
+      "coerce": "trim",
+      "onMissing": "fail"
+    },
+    "accountType": {
+      "type": "string",
+      "description": "CHECKING or SAVINGS.",
+      "source": {
+        "kind": "variable",
+        "name": "shownAccountType"
+      },
+      "coerce": "trim",
+      "onMissing": "fail"
+    },
+    "balance": {
+      "type": "number",
+      "description": "Current balance. Negative balances are real in ParaBank's seed data.",
+      "source": {
+        "kind": "variable",
+        "name": "shownBalance"
+      },
+      "coerce": "currency",
+      "onMissing": "fail"
+    }
+  },
+  "steps": [
+    {
+      "id": "open_login",
+      "action": {
+        "action": "navigate",
+        "url": "{{baseUrl}}/index.htm"
+      },
+      "postcondition": {
+        "kind": "role",
+        "role": "heading",
+        "name": "Customer Login"
+      },
+      "rationale": "Entry point. The postcondition asserts the login heading rather than the username field: ParaBank's inputs carry no accessible name (the label is a sibling paragraph), so a role+name condition on the field could never hold. A target can fall back through candidates; a condition cannot, so conditions must name something that actually exists."
+    },
+    {
+      "id": "enter_username",
+      "action": {
+        "action": "fill",
+        "target": {
+          "description": "Username field",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "textbox",
+              "name": "Username"
+            },
+            {
+              "strategy": "css",
+              "value": "input[name='username']"
+            }
+          ]
+        },
+        "value": "{{secrets.parabankUsername}}"
+      }
+    },
+    {
+      "id": "enter_password",
+      "action": {
+        "action": "fill",
+        "target": {
+          "description": "Password field",
+          "candidates": [
+            {
+              "strategy": "css",
+              "value": "input[name='password']"
+            }
+          ]
+        },
+        "value": "{{secrets.parabankPassword}}"
+      },
+      "rationale": "Password inputs expose no accessible name in this app, so CSS on the form field name is the most stable candidate available. The value is a secret reference and is never stored resolved."
+    },
+    {
+      "id": "submit_login",
+      "action": {
+        "action": "click",
+        "target": {
+          "description": "Log In button",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "button",
+              "name": "Log In"
+            },
+            {
+              "strategy": "css",
+              "value": "input[value='Log In']"
+            }
+          ]
+        }
+      },
+      "rationale": "Asserting the next page directly on this step would race the navigation, so the wait is its own step. Determinism comes from waiting on an observable condition, never a sleep."
+    },
+    {
+      "id": "await_overview",
+      "action": {
+        "action": "wait",
+        "condition": {
+          "kind": "title",
+          "value": "Accounts Overview"
+        },
+        "timeoutMs": 15000
+      },
+      "rationale": "Explicit wait on an observable condition."
+    },
+    {
+      "id": "open_account",
+      "action": {
+        "action": "navigate",
+        "url": "{{baseUrl}}/activity.htm?id={{inputs.accountId}}"
+      },
+      "rationale": "No postcondition: this step legitimately lands on either the detail screen or the not-found screen, and the not-found case is a business outcome the handlers classify, not a failure."
+    },
+    {
+      "id": "await_account_screen",
+      "action": {
+        "action": "wait",
+        "condition": {
+          "kind": "any",
+          "conditions": [
+            {
+              "kind": "text",
+              "value": "Account Details"
+            },
+            {
+              "kind": "text",
+              "value": "Could not find account"
+            }
+          ]
+        },
+        "timeoutMs": 15000
+      },
+      "rationale": "Both outcomes are legitimate, so the wait is for EITHER screen having settled. Waiting only for the detail screen would spend the full timeout on the not-found path and report a timeout instead of the business outcome the application actually gave us."
+    },
+    {
+      "id": "read_account_id",
+      "action": {
+        "action": "extract",
+        "as": "shownAccountId",
+        "target": {
+          "description": "Account number on the detail screen",
+          "candidates": [
+            {
+              "strategy": "css",
+              "value": "#accountId"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read_account_type",
+      "action": {
+        "action": "extract",
+        "as": "shownAccountType",
+        "target": {
+          "description": "Account type on the detail screen",
+          "candidates": [
+            {
+              "strategy": "css",
+              "value": "#accountType"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read_balance",
+      "action": {
+        "action": "extract",
+        "as": "shownBalance",
+        "target": {
+          "description": "Balance on the detail screen",
+          "candidates": [
+            {
+              "strategy": "css",
+              "value": "#balance"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "handlers": [
+    {
+      "id": "account_not_found",
+      "match": {
+        "kind": "text",
+        "value": "Could not find account"
+      },
+      "scope": [
+        "await_account_screen",
+        "read_account_id",
+        "read_account_type",
+        "read_balance"
+      ],
+      "disposition": {
+        "kind": "business_outcome",
+        "outcome": "account_not_found",
+        "detail": {
+          "requestedAccountId": "{{inputs.accountId}}"
+        }
+      },
+      "note": "ParaBank renders 'Error! Could not find account # N' for an unknown account. The caller asked a question and got an answer; this is not a failure."
+    },
+    {
+      "id": "session_expired",
+      "match": {
+        "kind": "urlPattern",
+        "value": "**/login.htm*"
+      },
+      "scope": "global",
+      "disposition": {
+        "kind": "recover",
+        "remedy": "reauthenticate",
+        "maxAttempts": 1
+      },
+      "note": "Being bounced to the login screen mid-flow is recoverable once. A second bounce means something is wrong with the credentials, not the session."
+    },
+    {
+      "id": "internal_error",
+      "match": {
+        "kind": "text",
+        "value": "An internal error has occurred"
+      },
+      "scope": "global",
+      "disposition": {
+        "kind": "fail",
+        "code": "APP_ERROR"
+      },
+      "note": "Visible-only matching is essential here: this exact string sits in a hidden div on every healthy account page (docs/DAY0-FINDINGS.md section 3)."
+    }
+  ],
+  "checkpoint": {
+    "kind": "all",
+    "conditions": [
+      {
+        "kind": "text",
+        "value": "Account Details"
+      },
+      {
+        "kind": "not",
+        "condition": {
+          "kind": "text",
+          "value": "Could not find account"
+        }
+      }
+    ]
+  }
+}

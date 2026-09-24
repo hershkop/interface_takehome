@@ -86,3 +86,30 @@ Docker container, and so were 8090 and 8888; a scan found 8081, 9000, 9090, 3000
 Rather than ship a default that collides on a common developer setup, the published host port is
 **18080** (`${PARABANK_PORT:-18080}`), and both the port and the base URL are configurable.
 Nothing in the code hard-codes a port — `src/config.ts` derives the default base URL from it.
+
+## 6. ParaBank's login inputs have no accessible name (found in PR3)
+
+The ARIA snapshot of the login screen reads:
+
+```
+- heading "Customer Login" [level=2]
+- paragraph: Username
+- textbox                     <- no accessible name
+- paragraph: Password
+- textbox                     <- no accessible name
+- button "Log In"
+```
+
+The labels are sibling `<p>` elements, not `<label for=...>`, so the fields are anonymous to the
+accessibility tree. This is exactly the "legacy app, no test IDs, no clean DOM" surface the
+assignment describes, and it has two consequences worth recording.
+
+**The locator fallback chain earns its keep.** `role=textbox name="Username"` matches nothing
+and the resolver falls through to `css=input[name='username']`. The role candidate is kept in
+the artifact deliberately: it documents intent, and it is what would resolve on a tenant running
+a better-behaved build of the same product — which is the multi-tenant story in miniature.
+
+**Conditions are not candidate lists.** The first version of the artifact asserted
+`role=textbox name="Username"` as a postcondition and failed on step 0, because a condition has
+no fallbacks. Postconditions must name something that actually exists on the page; the artifact
+now asserts the `Customer Login` heading.

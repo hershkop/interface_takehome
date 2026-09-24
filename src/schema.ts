@@ -63,12 +63,22 @@ export type LeafCondition = z.infer<typeof LeafCondition>;
 export type Condition =
   | LeafCondition
   | { kind: "all"; conditions: Condition[] }
+  | { kind: "any"; conditions: Condition[] }
   | { kind: "not"; condition: Condition };
 
 export const Condition: z.ZodType<Condition> = z.lazy(() =>
   z.union([
     LeafCondition,
     z.object({ kind: z.literal("all"), conditions: z.array(Condition).min(1) }),
+    /**
+     * `any` was deliberately left out of the first cut and added when a real flow needed it:
+     * after navigating to an account, the page settles into EITHER the detail screen or the
+     * not-found screen. Waiting only for the detail screen would burn the whole timeout on the
+     * not-found path before the handlers ever got to classify it — turning a legitimate
+     * business outcome into a timeout. Waiting for "either screen has settled" is the honest
+     * condition, and it needs a disjunction.
+     */
+    z.object({ kind: z.literal("any"), conditions: z.array(Condition).min(1) }),
     z.object({ kind: z.literal("not"), condition: Condition }),
   ]),
 );
@@ -154,6 +164,15 @@ export const ErrorCode = z.enum([
   "POLICY_DENIED",
   "APP_ERROR",
   "HUMAN_ABORTED",
+  /**
+   * Caller supplied inputs the capability does not accept. PR1 dropped this on the reasoning
+   * that it is caught before the run starts — which is true, and beside the point: being
+   * rejected early still has to be *reported*, and reporting it as APP_ERROR would blame the
+   * application for the caller's mistake.
+   */
+  "INPUT_INVALID",
+  /** The artifact itself does not satisfy the schema. Distinct from a bad invocation. */
+  "ARTIFACT_INVALID",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
 
