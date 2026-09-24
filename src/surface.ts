@@ -33,7 +33,7 @@ export interface ActionOutcome {
   /** Present when the action read something off the page. */
   value?: string;
   error?: string;
-  errorCode?: "TARGET_NOT_FOUND" | "TARGET_AMBIGUOUS" | "STEP_TIMEOUT";
+  errorCode?: "TARGET_NOT_FOUND" | "TARGET_AMBIGUOUS" | "STEP_TIMEOUT" | "POLICY_DENIED";
   attempts?: AttemptLog[];
 }
 

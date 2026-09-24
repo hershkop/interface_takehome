@@ -67,6 +67,21 @@ beforeAll(async () => {
   await fixture("notfound.html", `<h1>Error!</h1><p>Could not find account # 99999</p>`);
   await fixture("ambiguous.html", `<button>Go</button><button>Go</button>`);
   await fixture("empty.html", `<p>nothing to see</p>`);
+  await fixture("spa-route.html", `
+    <h1>Account Details</h1>
+    <span id="balance">-$100.00</span>
+    <button id="goadmin">Admin</button>
+    <script>
+      // A client-side router: no document request, so a network-level guard never sees it.
+      document.getElementById('goadmin').addEventListener('click', () => {
+        history.pushState({}, '', '/admin/console');
+      });
+    </script>`);
+  await fixture("slow-page.html", `
+    <h1>Loading</h1>
+    <script>
+      // Never settles, so any wait on it burns the full budget.
+    </script>`);
   await fixture("offsite-link.html", `
     <h1>Account Details</h1>
     <span id="balance">-$100.00</span>
@@ -988,5 +1003,220 @@ describe("policy decides what needs a human (PR4)", () => {
     });
     expect(result.status).toBe("failure");
     if (result.status === "failure") expect(result.error.code).toBe("POLICY_DENIED");
+  }, 60_000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regressions from PR4 review.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("policy applies to everything that drives the browser (review #1, #2)", () => {
+  it("refuses a dismiss remedy that clicks when clicking is blocked", async () => {
+    // Recovery ran before the loop's policy checks and clicked the surface directly, so a
+    // read-only policy still performed clicks during recovery.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        handlers: [
+          {
+            id: "dismiss_notice",
+            match: { kind: "text", value: "Session notice" },
+            scope: "global",
+            disposition: {
+              kind: "recover",
+              remedy: "dismiss",
+              target: { candidates: [{ strategy: "css", value: "#ok" }] },
+              maxAttempts: 2,
+            },
+          },
+        ],
+      }),
+      inputs: { page: "dialog.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ blockedActions: ["click"] }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("POLICY_DENIED");
+      expect(result.error.message).toContain("click");
+    }
+  }, 60_000);
+
+  it("gives the re-authentication callback a guarded surface", async () => {
+    // A login routine navigates, types and clicks. None of it went through a check.
+    const attempted: string[] = [];
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        handlers: [
+          {
+            id: "session_expired",
+            match: { kind: "text", value: "Could not find account" },
+            scope: "global",
+            disposition: { kind: "recover", remedy: "reauthenticate", maxAttempts: 1 },
+          },
+        ],
+      }),
+      inputs: { page: "notfound.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ blockedActions: ["fill"] }),
+      reauthenticate: async (surface) => {
+        const outcome = await surface.fill(
+          { candidates: [{ strategy: "css", value: "#nothing" }] },
+          "secret",
+        );
+        attempted.push(outcome.errorCode ?? "allowed");
+        return outcome.ok;
+      },
+    });
+    // The callback's fill was refused by policy rather than executed.
+    expect(attempted).toEqual(["POLICY_DENIED"]);
+    expect(result.status).toBe("failure");
+  }, 60_000);
+
+  it("refuses a locator-backed output when extract is blocked", async () => {
+    // collectOutputs called the surface directly, so declaring a locator output read data that
+    // an extract step was forbidden from reading.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {
+          balance: {
+            type: "number",
+            source: {
+              kind: "locator",
+              target: { candidates: [{ strategy: "css", value: "#balance" }] },
+            },
+            coerce: "currency",
+          },
+        },
+        steps: [{ id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } }],
+        handlers: [],
+      }),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ blockedActions: ["extract"] }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") expect(result.error.code).toBe("TARGET_NOT_FOUND");
+  }, 60_000);
+});
+
+describe("client-side routing cannot escape the allowlist (review #4)", () => {
+  it("detects a pushState route change that issues no document request", async () => {
+    // The network guard only sees document requests. A single-page app routes without one, so
+    // a click could move to /admin and every later step would run there.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        checkpoint: { kind: "text", value: "Account Details" },
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "route",
+            action: { action: "click", target: { candidates: [{ strategy: "css", value: "#goadmin" }] } },
+          },
+        ],
+        handlers: [],
+      }),
+      inputs: { page: "spa-route.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ allowedPaths: ["/spa-route.html", "/detail.html"] }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("POLICY_DENIED");
+      expect(result.error.message).toContain("/admin/console");
+    }
+  }, 60_000);
+});
+
+describe("runTimeoutMs is a real ceiling (review #3)", () => {
+  it("stops a single operation that would outlast the whole budget", async () => {
+    // Checking the deadline only between steps let one long wait overrun by any amount.
+    const started = Date.now();
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        checkpoint: { kind: "text", value: "never" },
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "wait_forever",
+            action: {
+              action: "wait",
+              condition: { kind: "text", value: "never appears" },
+              timeoutMs: 60_000,
+            },
+          },
+        ],
+        handlers: [],
+      }),
+      inputs: { page: "slow-page.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ runTimeoutMs: 2_000 }),
+    });
+
+    const elapsed = Date.now() - started;
+    expect(result.status).toBe("failure");
+    // The step asked for 60s; the policy allowed 2s.
+    expect(elapsed).toBeLessThan(25_000);
+  }, 60_000);
+});
+
+describe("redaction rules cannot fail open (review #5, #6)", () => {
+  it("rejects a policy whose redaction pattern does not compile", () => {
+    // Skipping a malformed rule fails OPEN: the tenant believes a value is scrubbed and it is
+    // written verbatim. A redaction rule that cannot compile must stop the run.
+    const parsed = Policy.safeParse({
+      allowedOrigins: ["http://a.test"],
+      redactPatterns: ["([unclosed"],
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("masks a sensitive input too short for literal scrubbing", async () => {
+    // The redactor ignores literals under three characters, deliberately. A PIN declared
+    // sensitive is exactly that short and was written verbatim.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        inputs: { page: { type: "string" }, pin: { type: "string", sensitive: true } },
+        steps: [{ id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } }],
+        handlers: [],
+        checkpoint: { kind: "text", value: "Account Details" },
+      }),
+      inputs: { page: "detail.html", pin: "42" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy(),
+    });
+
+    const header = JSON.parse(await readFile(join(result.evidence.directory, "run.json"), "utf8"));
+    expect(header.inputs.pin).toBe("[REDACTED]");
+    expect(header.inputs.page).toBe("detail.html");
+  }, 60_000);
+});
+
+describe("evidence records the whole policy (review #7)", () => {
+  it("persists every field a reader would need to judge a decision", async () => {
+    const result = await run({}, { page: "detail.html" });
+    const header = JSON.parse(await readFile(join(result.evidence.directory, "run.json"), "utf8"));
+    for (const field of [
+      "allowedOrigins",
+      "allowedPaths",
+      "allowedActions",
+      "blockedActions",
+      "requireApprovalFor",
+      "maxSteps",
+      "runTimeoutMs",
+      "redactPatterns",
+    ]) {
+      expect(header.policy, field).toHaveProperty(field);
+    }
   }, 60_000);
 });

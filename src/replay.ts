@@ -32,9 +32,9 @@ import {
   type RunResult,
 } from "./schema.js";
 import { EvidenceRecorder, newRunId } from "./evidence.js";
-import { PolicyGuard } from "./safety.js";
+import { GuardedSurface, PolicyGuard } from "./safety.js";
 import { createRedactor, type Redactor } from "./redact.js";
-import { PlaywrightSurface, describeCondition } from "./surface.js";
+import { PlaywrightSurface, describeCondition, type Surface } from "./surface.js";
 import {
   coerce,
   coerceInput,
@@ -74,7 +74,8 @@ export interface ReplayOptions {
    * remedy without a provider fails loudly instead of silently continuing logged out.
    */
   reauthenticate?: (
-    surface: PlaywrightSurface,
+    /** Policy-guarded: a login routine cannot type or click outside what policy permits. */
+    surface: Surface,
     /**
      * Invocation-scoped, not process-scoped. A callback that reached for global configuration
      * would re-authenticate against the DEFAULT tenant after a session expiry, and the run
@@ -86,7 +87,10 @@ export interface ReplayOptions {
 
 /** Everything the engine needs while a run is in flight. */
 interface RunContext {
-  surface: PlaywrightSurface;
+  /** Policy-guarded. Everything that drives the browser goes through this. */
+  surface: Surface;
+  /** The raw surface, used only for evidence capture (screenshots need the Page). */
+  rawSurface: PlaywrightSurface;
   recorder: EvidenceRecorder;
   scope: TemplateScope;
   redact: Redactor;
@@ -138,9 +142,12 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
   // matched by DECLARATION: an artifact author who writes `sensitive: true` has said this value
   // is regulated, and that statement has to actually do something — otherwise the field is a
   // promise the system does not keep, which is worse than not offering it.
-  const sensitiveInputValues = Object.entries(artifact.inputs)
+  const sensitiveInputNames = Object.entries(artifact.inputs)
     .filter(([, definition]) => definition.sensitive)
-    .map(([name]) => inputs.values[name])
+    .map(([name]) => name);
+
+  const sensitiveInputValues = sensitiveInputNames
+    .map((name) => inputs.values[name])
     .filter((value): value is string | number => value !== undefined && value !== null)
     .map(String);
 
@@ -171,18 +178,23 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
 
   const baseUrl = options.baseUrl ?? artifact.target.baseUrl;
   await recorder.writeRunHeader({
-    policy: {
-      allowedOrigins: options.policy.allowedOrigins,
-      allowedPaths: options.policy.allowedPaths,
-      blockedActions: options.policy.blockedActions,
-      maxSteps: options.policy.maxSteps,
-    },
+    // The whole normalised policy. A partial record cannot answer "why was this allowed?" —
+    // which is the only question the record exists to answer. It passes through the redactor
+    // like everything else, so a pattern that embeds a literal secret is still scrubbed.
+    policy: options.policy,
     capabilityId: artifact.capabilityId,
     capabilityVersion: artifact.version,
     artifactStatus: artifact.metadata.status,
     risk: artifact.metadata.risk,
     baseUrl,
-    inputs: inputs.values,
+    // Masked by NAME, not by matching the value.
+    //
+    // Literal substitution alone is not enough here: the redactor deliberately ignores literals
+    // shorter than three characters, because scrubbing every "42" out of a log destroys it. A
+    // PIN declared sensitive is exactly that short, and would have been written verbatim. An
+    // explicit declaration deserves a mechanism that does not depend on the value's length or
+    // on it coincidentally matching a pattern.
+    inputs: maskSensitive(inputs.values, sensitiveInputNames),
     startedAt: new Date().toISOString(),
   });
 
@@ -203,8 +215,13 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       navigationAllowed: guard.navigationAllowed,
     });
 
+    const guardedSurface = new GuardedSurface(surface, guard, (reason) => {
+      void recorder.event({ type: "policy.denied", detail: { reason } });
+    });
+
     const context: RunContext = {
-      surface,
+      surface: guardedSurface,
+      rawSurface: surface,
       recorder,
       redact,
       scope: { baseUrl, inputs: inputs.values, secrets, vars: {} },
@@ -221,7 +238,29 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
 
     guard.begin();
 
-    terminal = await runSteps(artifact.steps, artifact.handlers, context);
+    // A true wall-clock ceiling needs three things, because checking between steps is not one.
+    //
+    //   The guarded surface refuses any action once the deadline has passed, and clamps every
+    //   wait to the remaining budget, so the common case never overruns.
+    //
+    //   The step loop checks between steps, which catches a chain of cheap operations.
+    //
+    //   This race is the backstop for the case neither covers: one operation that blocks longer
+    //   than the whole budget — a locator resolving against a hung page, a postcondition poll, a
+    //   remedy that stalls. Without it, `runTimeoutMs` is advisory.
+    terminal = await withDeadline(
+      runSteps(artifact.steps, artifact.handlers, context),
+      guard.remainingMs(),
+      () => ({
+        kind: "failure" as const,
+        error: {
+          code: "POLICY_DENIED" as const,
+          message: `run exceeded the policy timeout of ${options.policy.runTimeoutMs}ms`,
+          recoverable: false,
+          attempts: 1,
+        },
+      }),
+    );
 
     if (!terminal) {
       // Outputs are read before the checkpoint, so a failed checkpoint can still report what
@@ -282,6 +321,46 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
   return result;
 }
 
+
+
+/**
+ * Resolves the work, or the timeout value if the budget runs out first.
+ *
+ * The losing promise is not cancelled — there is no safe way to abort a Playwright call
+ * mid-flight — but the run stops waiting on it and the surface is closed in the caller's
+ * `finally`, which tears down whatever it was doing.
+ */
+async function withDeadline<T>(
+  work: Promise<T>,
+  budgetMs: number,
+  onTimeout: () => T,
+): Promise<T> {
+  if (budgetMs <= 0) return onTimeout();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout()), budgetMs);
+  });
+
+  try {
+    return await Promise.race([work, expiry]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Replaces declared-sensitive values with a marker, regardless of their length or shape. */
+function maskSensitive(
+  values: Record<string, unknown>,
+  sensitiveNames: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...values };
+  for (const name of sensitiveNames) {
+    if (name in out) out[name] = "[REDACTED]";
+  }
+  return out;
+}
+
 /** Defensive: `terminal` is set on every path that does not produce outputs. */
 function unexpectedTerminal(): TerminalOutcome {
   return {
@@ -333,9 +412,7 @@ async function runSteps(
       if (!budget.allowed) return policyDenied(step, index, budget.reason);
       const deadline = context.guard.checkDeadline();
       if (!deadline.allowed) return policyDenied(step, index, deadline.reason);
-
-      const permitted = await checkActionPolicy(step, index, context);
-      if (permitted) return permitted;
+      void deadline;
 
       const outcome = await executeStep(step, index, context);
 
@@ -397,9 +474,21 @@ async function runSteps(
         break;
       }
 
+      // A policy denial is terminal. Repeating a refused action just produces the same
+      // refusal more slowly, and retrying it would misreport a guard decision as flakiness.
+      if (outcome.error.code === "POLICY_DENIED") {
+        await context.recorder.event({
+          type: "policy.denied",
+          stepId: step.id,
+          stepIndex: index,
+          actionType: step.action.action,
+          detail: { reason: outcome.error.message },
+        });
+        return { kind: "failure", error: outcome.error };
+      }
+
       // Retries are bounded and only apply where the artifact declared them. A validation
-      // error or a policy denial is never retried — repeating a rejected action just produces
-      // the same rejection more slowly.
+      // error is never retried either.
       if (attempt < maxAttempts) {
         await context.recorder.event({
           type: "step.retry",
@@ -588,40 +677,6 @@ async function verifyPostcondition(
 }
 
 
-/**
- * Checks the resolved action against policy before it executes.
- *
- * The URL is resolved first so the allowlist sees the destination a template actually produces
- * — checking `{{baseUrl}}/x` as a literal would check nothing.
- */
-async function checkActionPolicy(
-  step: ArtifactStep,
-  index: number,
-  context: RunContext,
-): Promise<TerminalOutcome | undefined> {
-  let resolvedUrl: string | undefined;
-  if (step.action.action === "navigate") {
-    try {
-      resolvedUrl = resolveTemplate(step.action.url, context.scope);
-    } catch {
-      // An unresolved template is reported by executeStep with a better message.
-      resolvedUrl = undefined;
-    }
-  }
-
-  const decision = context.guard.checkAction(step.action, resolvedUrl);
-  if (decision.allowed) return undefined;
-
-  await context.recorder.event({
-    type: "policy.denied",
-    stepId: step.id,
-    stepIndex: index,
-    actionType: step.action.action,
-    detail: { reason: decision.reason },
-  });
-  return policyDenied(step, index, decision.reason);
-}
-
 function policyDenied(step: ArtifactStep, index: number, reason: string | undefined): TerminalOutcome {
   return {
     kind: "failure",
@@ -709,22 +764,31 @@ async function applyHandlers(
 
     const recovered = await applyRemedy(disposition, context);
     await context.recorder.event({
-      type: recovered ? "handler.recovered" : "handler.recovery_failed",
+      type: recovered.ok ? "handler.recovered" : "handler.recovery_failed",
       stepId: step.id,
       stepIndex: index,
-      detail: { handler: handler.id, remedy: disposition.remedy, attempt: used + 1 },
+      detail: {
+        handler: handler.id,
+        remedy: disposition.remedy,
+        attempt: used + 1,
+        ...(recovered.ok ? {} : { reason: recovered.reason }),
+      },
     });
 
-    if (!recovered) {
+    if (!recovered.ok) {
       return {
         kind: "terminate",
         result: {
           kind: "failure",
           error: {
-            code: "APP_ERROR",
-            message: `recovery "${handler.id}" (${disposition.remedy}) did not succeed`,
+            // A refusal is a policy decision, not a flaky application. Reporting it as
+            // APP_ERROR would send the reader looking at the wrong system.
+            code: recovered.denied ? "POLICY_DENIED" : "APP_ERROR",
+            message: recovered.denied
+              ? `recovery "${handler.id}" refused: ${recovered.reason}`
+              : `recovery "${handler.id}" (${disposition.remedy}) did not succeed: ${recovered.reason}`,
             step: { id: step.id, index },
-            recoverable: true,
+            recoverable: !recovered.denied,
             attempts: used + 1,
           },
         },
@@ -748,23 +812,45 @@ function inScope(handler: Handler, stepId: string): boolean {
   return handler.scope === "global" || handler.scope.includes(stepId);
 }
 
+/**
+ * Outcome of a remedy. A policy refusal is reported distinctly from a remedy that simply did
+ * not work: "the interstitial would not dismiss" and "you are not permitted to click" need
+ * different responses from whoever reads the run.
+ */
+type RemedyOutcome =
+  | { ok: true }
+  | { ok: false; denied: true; reason: string }
+  | { ok: false; denied: false; reason: string };
+
 async function applyRemedy(
   disposition: Extract<Handler["disposition"], { kind: "recover" }>,
   context: RunContext,
-): Promise<boolean> {
+): Promise<RemedyOutcome> {
   switch (disposition.remedy) {
     case "dismiss": {
       const result = await context.surface.click(disposition.target);
-      return result.ok;
+      if (result.ok) return { ok: true };
+      return result.errorCode === "POLICY_DENIED"
+        ? { ok: false, denied: true, reason: result.error ?? "refused by policy" }
+        : { ok: false, denied: false, reason: result.error ?? "dismiss did not succeed" };
     }
     case "retry_step":
-      return true;
+      return { ok: true };
     case "reauthenticate": {
-      if (!context.options.reauthenticate) return false;
-      return context.options.reauthenticate(context.surface, {
+      if (!context.options.reauthenticate) {
+        return {
+          ok: false,
+          denied: false,
+          reason: "artifact declares a reauthenticate remedy but no provider was supplied",
+        };
+      }
+      const ok = await context.options.reauthenticate(context.surface, {
         baseUrl: context.scope.baseUrl,
         secrets: context.scope.secrets,
       });
+      return ok
+        ? { ok: true }
+        : { ok: false, denied: false, reason: "re-authentication did not succeed" };
     }
   }
 }
@@ -996,7 +1082,7 @@ function earlyFailure(code: ErrorCode, message: string): RunResult {
 
 async function captureFailureContext(context: RunContext, label: string): Promise<void> {
   try {
-    await context.recorder.screenshot(context.surface.page, `failure-${label}`);
+    await context.recorder.screenshot(context.rawSurface.page, `failure-${label}`);
     await context.recorder.failureSnapshot(await context.surface.observe(0), { label });
   } catch {
     // Evidence capture must never be the reason a run reports something other than its

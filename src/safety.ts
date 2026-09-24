@@ -17,7 +17,16 @@
  *   that leaves the allowed application, a server-side redirect, a meta refresh. Checking the
  *   URL only after the fact would mean the browser had already been there.
  */
-import type { Action, ActionType, Policy, RiskClass } from "./schema.js";
+import type {
+  Action,
+  ActionType,
+  Condition,
+  Observation,
+  Policy,
+  RiskClass,
+  Target,
+} from "./schema.js";
+import type { ActionOutcome, CoordinateClickOutcome, Surface } from "./surface.js";
 import { globToRegExp } from "./surface.js";
 
 export interface PolicyDecision {
@@ -126,6 +135,11 @@ export class PolicyGuard {
     return ALLOWED;
   }
 
+  /** How much of the run's wall-clock budget is left. Never negative. */
+  remainingMs(): number {
+    return Math.max(0, this.policy.runTimeoutMs - (Date.now() - this.started));
+  }
+
   /** Enforces the wall-clock ceiling for a whole run. */
   checkDeadline(): PolicyDecision {
     const elapsed = Date.now() - this.started;
@@ -166,4 +180,140 @@ export class PolicyGuard {
 /** Builds a guard from policy, with the ParaBank-shaped default living in config.ts. */
 export function createGuard(policy: Policy): PolicyGuard {
   return new PolicyGuard(policy);
+}
+
+// ─── Guarded surface ───────────────────────────────────────────────────────────
+
+/**
+ * A Surface that refuses anything policy disallows.
+ *
+ * Putting the checks in a wrapper rather than in the replay loop is what makes them
+ * unavoidable. The loop is not the only thing that drives the browser: a `dismiss` remedy
+ * clicks, a re-authentication callback navigates and types, and output collection extracts.
+ * Each of those is a real action against a real application, and each was reaching the browser
+ * without passing a single check while the loop above it was carefully guarded.
+ *
+ * Anything holding one of these cannot act outside the policy, whoever wrote it.
+ */
+export class GuardedSurface implements Surface {
+  constructor(
+    private readonly inner: Surface,
+    private readonly guard: PolicyGuard,
+    /** Called whenever something is refused, so the run log records why. */
+    private readonly onDenied?: (reason: string) => void,
+  ) {}
+
+  private deny(reason: string): ActionOutcome {
+    this.onDenied?.(reason);
+    return { ok: false, errorCode: "POLICY_DENIED", error: reason };
+  }
+
+  /** Type check plus the run deadline, applied to every action that touches the browser. */
+  private precheck(type: ActionType): ActionOutcome | undefined {
+    const allowed = this.guard.checkActionType(type);
+    if (!allowed.allowed) return this.deny(allowed.reason ?? `action "${type}" refused`);
+
+    // Checked here, not only in the step loop, so a long chain of remedies or output reads
+    // cannot run past the ceiling unobserved.
+    const deadline = this.guard.checkDeadline();
+    if (!deadline.allowed) return this.deny(deadline.reason ?? "run timeout exceeded");
+
+    return undefined;
+  }
+
+  /**
+   * Re-checks the address after an action.
+   *
+   * The browser-level guard only sees document requests. A single-page app that routes with
+   * `history.pushState()` issues none, so a click could move from an allowed route to /admin
+   * and every later step would run there, inside the allowlist as far as the network was
+   * concerned. ParaBank is server-rendered and never does this; the check exists because the
+   * design claim is about surfaces in general, not about ParaBank.
+   */
+  private checkLanding(): ActionOutcome | undefined {
+    const url = this.inner.currentUrl();
+    if (url === "about:blank") return undefined;
+    const decision = this.guard.checkUrl(url);
+    if (decision.allowed) return undefined;
+    return this.deny(`after acting, the session was at ${url}: ${decision.reason}`);
+  }
+
+  async navigate(url: string): Promise<ActionOutcome> {
+    const refused = this.precheck("navigate");
+    if (refused) return refused;
+
+    // The destination is checked before the request, so a disallowed URL produces a precise
+    // refusal rather than an aborted-request error from the network guard.
+    const target = this.guard.checkUrl(url);
+    if (!target.allowed) return this.deny(target.reason ?? `navigation to ${url} refused`);
+
+    const result = await this.inner.navigate(url);
+    return this.checkLanding() ?? result;
+  }
+
+  async click(target: Target): Promise<ActionOutcome> {
+    const refused = this.precheck("click");
+    if (refused) return refused;
+    const result = await this.inner.click(target);
+    return this.checkLanding() ?? result;
+  }
+
+  async fill(target: Target, value: string): Promise<ActionOutcome> {
+    const refused = this.precheck("fill");
+    if (refused) return refused;
+    const result = await this.inner.fill(target, value);
+    return this.checkLanding() ?? result;
+  }
+
+  async select(target: Target, value: string): Promise<ActionOutcome> {
+    const refused = this.precheck("select");
+    if (refused) return refused;
+    const result = await this.inner.select(target, value);
+    return this.checkLanding() ?? result;
+  }
+
+  async waitFor(condition: Condition, timeoutMs: number): Promise<ActionOutcome> {
+    const refused = this.precheck("wait");
+    if (refused) return refused;
+    // Never wait past the run's own ceiling.
+    return this.inner.waitFor(condition, Math.max(0, Math.min(timeoutMs, this.guard.remainingMs())));
+  }
+
+  async extract(target: Target, attribute?: string): Promise<ActionOutcome> {
+    // Output collection reads through this too, so "extract is blocked" cannot be sidestepped
+    // by declaring a locator-backed output instead of an extract step.
+    const refused = this.precheck("extract");
+    if (refused) return refused;
+    return attribute === undefined
+      ? this.inner.extract(target)
+      : this.inner.extract(target, attribute);
+  }
+
+  async verify(condition: Condition): Promise<boolean> {
+    return this.inner.verify(condition);
+  }
+
+  currentUrl(): string {
+    return this.inner.currentUrl();
+  }
+
+  takeBlockedNavigations(): string[] {
+    return this.inner.takeBlockedNavigations();
+  }
+
+  async clickAt(x: number, y: number): Promise<CoordinateClickOutcome> {
+    const refused = this.precheck("click");
+    if (refused) return refused;
+    const result = await this.inner.clickAt(x, y);
+    const landing = this.checkLanding();
+    return landing ? { ...landing } : result;
+  }
+
+  async observe(step: number): Promise<Observation> {
+    return this.inner.observe(step);
+  }
+
+  async close(): Promise<string | undefined> {
+    return this.inner.close();
+  }
 }

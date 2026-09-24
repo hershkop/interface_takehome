@@ -7,7 +7,7 @@
  * which application it is pointed at.
  */
 import { Target } from "./schema.js";
-import type { PlaywrightSurface } from "./surface.js";
+import type { Surface } from "./surface.js";
 
 const usernameField = Target.parse({
   description: "Username field",
@@ -40,7 +40,7 @@ const loginButton = Target.parse({
  * like a successful run.
  */
 export async function loginToParabank(
-  surface: PlaywrightSurface,
+  surface: Surface,
   context: { baseUrl: string; secrets: Record<string, string> },
 ): Promise<boolean> {
   const username = context.secrets.parabankUsername;
