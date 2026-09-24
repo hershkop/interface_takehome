@@ -1,0 +1,187 @@
+{
+  "schemaVersion": "1.0",
+  "capabilityId": "lookup_balance_discovered",
+  "version": "1.0.0",
+  "metadata": {
+    "name": "lookup balance discovered",
+    "description": "Log in, then look up account 12678 and read its current balance and account type from the account detail screen.",
+    "status": "draft",
+    "risk": "safe",
+    "recordedAt": "2026-09-24T14:22:28.874Z",
+    "recordedBy": "llm",
+    "model": "claude-opus-5"
+  },
+  "target": {
+    "app": "parabank",
+    "baseUrl": "http://localhost:18080/parabank"
+  },
+  "inputs": {
+    "accountId": {
+      "type": "string",
+      "required": true,
+      "sensitive": false
+    }
+  },
+  "outputs": {
+    "balance": {
+      "type": "string",
+      "source": {
+        "kind": "variable",
+        "name": "balance"
+      },
+      "coerce": "currency",
+      "onMissing": "fail"
+    },
+    "accountType": {
+      "type": "string",
+      "source": {
+        "kind": "variable",
+        "name": "accountType"
+      },
+      "coerce": "trim",
+      "onMissing": "fail"
+    }
+  },
+  "steps": [
+    {
+      "id": "navigate_0",
+      "action": {
+        "action": "navigate",
+        "url": "{{baseUrl}}/index.htm"
+      },
+      "rationale": "The allowlist indicates the application is hosted at localhost:18080, so open the ParaBank index there."
+    },
+    {
+      "id": "fill_1",
+      "action": {
+        "action": "fill",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "css",
+              "value": "input[name=\"username\"]"
+            }
+          ]
+        },
+        "value": "{{secrets.parabankUsername}}"
+      },
+      "rationale": "Enter the username; the field has no accessible name, so I target it by its name attribute."
+    },
+    {
+      "id": "fill_2",
+      "action": {
+        "action": "fill",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "css",
+              "value": "input[name=\"password\"]"
+            }
+          ]
+        },
+        "value": "{{secrets.parabankPassword}}"
+      },
+      "rationale": "Enter the password; this field also lacks an accessible name, so I target it by its name attribute."
+    },
+    {
+      "id": "click_3",
+      "action": {
+        "action": "click",
+        "target": {
+          "description": "Log In",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "button",
+              "name": "Log In",
+              "exact": false
+            }
+          ]
+        }
+      },
+      "rationale": "Submit the login form using the button's accessible name."
+    },
+    {
+      "id": "wait_4",
+      "action": {
+        "action": "wait",
+        "condition": {
+          "kind": "text",
+          "value": "{{inputs.accountId}}",
+          "visible": true
+        },
+        "timeoutMs": 10000
+      },
+      "rationale": "The overview table body has no rows yet; wait for the account number to render before clicking it."
+    },
+    {
+      "id": "click_5",
+      "action": {
+        "action": "click",
+        "target": {
+          "description": "{{inputs.accountId}}",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "link",
+              "name": "{{inputs.accountId}}",
+              "exact": false
+            }
+          ]
+        }
+      },
+      "rationale": "Open the detail screen for the target account via its link, identified by the account number as accessible name."
+    },
+    {
+      "id": "wait_6",
+      "action": {
+        "action": "wait",
+        "condition": {
+          "kind": "text",
+          "value": "{{inputs.accountId}}",
+          "visible": true
+        },
+        "timeoutMs": 10000
+      },
+      "rationale": "The Account Details cells are blank pending an async fetch; wait for the account number value to render."
+    },
+    {
+      "id": "extract_7",
+      "action": {
+        "action": "extract",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "css",
+              "value": "#balance"
+            }
+          ]
+        },
+        "as": "balance"
+      },
+      "rationale": "Capture the current balance from the Account Details table; the cell has no accessible name, so I target it by its id."
+    },
+    {
+      "id": "extract_8",
+      "action": {
+        "action": "extract",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "css",
+              "value": "#accountType"
+            }
+          ]
+        },
+        "as": "accountType"
+      },
+      "rationale": "Capture the account type from the Account Details table; the cell has no accessible name, so I target it by its id."
+    }
+  ],
+  "handlers": [],
+  "checkpoint": {
+    "kind": "text",
+    "value": "Account Details",
+    "visible": true
+  }
+}

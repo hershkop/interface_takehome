@@ -173,3 +173,87 @@ export function coerceInput(
   }
   return { ok: true, value };
 }
+
+/**
+ * Resolves references inside a locator, not just inside action values.
+ *
+ * A parameter does not always live in a value. Reaching an account by clicking a link whose
+ * accessible name IS the account number puts the parameter in the target — and a target that
+ * still says `{{inputs.accountId}}` at replay time matches nothing, which is how this surfaced:
+ * a discovered capability that recorded correctly and then failed on its first replay.
+ */
+export function resolveTargetTemplates(
+  target: { description?: string; candidates: readonly unknown[] },
+  scope: TemplateScope,
+): { description?: string; candidates: unknown[] } {
+  const swap = (value: string): string => {
+    try {
+      return resolveTemplate(value, scope);
+    } catch {
+      return value;
+    }
+  };
+
+  return {
+    ...(target.description === undefined ? {} : { description: swap(target.description) }),
+    candidates: target.candidates.map((raw) => {
+      const candidate = raw as Record<string, unknown>;
+      if (candidate.strategy === "role" && typeof candidate.name === "string") {
+        return { ...candidate, name: swap(candidate.name) };
+      }
+      if (
+        (candidate.strategy === "text" ||
+          candidate.strategy === "css" ||
+          candidate.strategy === "label" ||
+          candidate.strategy === "testId") &&
+        typeof candidate.value === "string"
+      ) {
+        return { ...candidate, value: swap(candidate.value) };
+      }
+      return candidate;
+    }),
+  };
+}
+
+/**
+ * Resolves references inside a condition.
+ *
+ * The third place a parameter can hide, after action values and locator names: waiting for the
+ * text "12678" to appear is waiting for one specific account. Each of these was found by an
+ * end-to-end replay of a discovered capability rather than by reading the code, which is a
+ * decent argument for why the discovery loop and the replay loop have to be exercised together.
+ */
+export function resolveConditionTemplates<T>(condition: T, scope: TemplateScope): T {
+  const swap = (value: string): string => {
+    try {
+      return resolveTemplate(value, scope);
+    } catch {
+      return value;
+    }
+  };
+
+  const node = condition as unknown as Record<string, unknown>;
+  if (!node || typeof node !== "object") return condition;
+
+  switch (node.kind) {
+    case "text":
+    case "title":
+    case "urlPattern":
+      return { ...node, value: swap(String(node.value)) } as T;
+    case "role":
+      return {
+        ...node,
+        ...(typeof node.name === "string" ? { name: swap(node.name) } : {}),
+      } as T;
+    case "all":
+    case "any":
+      return {
+        ...node,
+        conditions: (node.conditions as unknown[]).map((c) => resolveConditionTemplates(c, scope)),
+      } as T;
+    case "not":
+      return { ...node, condition: resolveConditionTemplates(node.condition, scope) } as T;
+    default:
+      return condition;
+  }
+}

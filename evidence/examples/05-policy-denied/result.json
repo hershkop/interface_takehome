@@ -1,0 +1,21 @@
+{
+  "status": "failure",
+  "error": {
+    "code": "POLICY_DENIED",
+    "message": "action type \"fill\" is blocked by policy",
+    "step": {
+      "id": "enter_username",
+      "index": 1
+    },
+    "recoverable": false,
+    "attempts": 1
+  },
+  "evidence": {
+    "runId": "replay-20260924T142322-nvp8d",
+    "directory": "evidence/replay-20260924T142322-nvp8d",
+    "eventLog": "evidence/replay-20260924T142322-nvp8d/events.jsonl",
+    "traceUnredacted": false,
+    "screenshots": [],
+    "modelCalls": 0
+  }
+}

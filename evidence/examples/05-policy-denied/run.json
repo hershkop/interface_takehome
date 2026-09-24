@@ -1,0 +1,38 @@
+{
+  "runId": "replay-20260924T142322-nvp8d",
+  "phase": "replay",
+  "policy": {
+    "allowedOrigins": [
+      "http://localhost:18080"
+    ],
+    "allowedPaths": [
+      "/parabank/**"
+    ],
+    "allowedActions": [
+      "navigate",
+      "wait",
+      "extract",
+      "assert"
+    ],
+    "blockedActions": [
+      "click",
+      "fill",
+      "select"
+    ],
+    "requireApprovalFor": [
+      "approval_required"
+    ],
+    "maxSteps": 25,
+    "runTimeoutMs": 120000,
+    "redactPatterns": []
+  },
+  "capabilityId": "lookup_account_balance",
+  "capabilityVersion": "1.0.0",
+  "artifactStatus": "approved",
+  "risk": "safe",
+  "baseUrl": "http://localhost:18080/parabank",
+  "inputs": {
+    "accountId": "12678"
+  },
+  "startedAt": "2026-09-24T14:23:22.443Z"
+}

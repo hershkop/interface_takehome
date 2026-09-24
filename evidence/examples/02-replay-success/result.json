@@ -1,0 +1,15 @@
+{
+  "status": "success",
+  "outputs": {
+    "balance": -2300,
+    "accountType": "CHECKING"
+  },
+  "evidence": {
+    "runId": "replay-20260924T142317-2bobs",
+    "directory": "evidence/replay-20260924T142317-2bobs",
+    "eventLog": "evidence/replay-20260924T142317-2bobs/events.jsonl",
+    "traceUnredacted": false,
+    "screenshots": [],
+    "modelCalls": 0
+  }
+}

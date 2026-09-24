@@ -1,0 +1,24 @@
+{
+  "status": "failure",
+  "error": {
+    "code": "HUMAN_ABORTED",
+    "message": "operator stopped the run at step \"submit_transfer\": operator aborted",
+    "step": {
+      "id": "submit_transfer",
+      "index": 9
+    },
+    "recoverable": false,
+    "attempts": 1
+  },
+  "evidence": {
+    "runId": "replay-20260924T142320-154ce",
+    "directory": "evidence/replay-20260924T142320-154ce",
+    "eventLog": "evidence/replay-20260924T142320-154ce/events.jsonl",
+    "traceUnredacted": false,
+    "screenshots": [
+      "evidence/replay-20260924T142320-154ce/001-intervention-submit_transfer.png",
+      "evidence/replay-20260924T142320-154ce/002-resumed-submit_transfer.png"
+    ],
+    "modelCalls": 0
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "runId": "discover-20260924T142132-uti7w",
+  "phase": "discovery",
+  "goal": "Log in, then look up account 12678 and read its current balance and account type from the account detail screen.",
+  "capabilityId": "lookup_balance_discovered",
+  "model": "claude-opus-5",
+  "baseUrl": "http://localhost:18080/parabank",
+  "policy": {
+    "allowedOrigins": [
+      "http://localhost:18080"
+    ],
+    "allowedPaths": [
+      "/parabank/**"
+    ],
+    "allowedActions": [
+      "navigate",
+      "click",
+      "fill",
+      "select",
+      "wait",
+      "extract",
+      "assert"
+    ],
+    "blockedActions": [],
+    "requireApprovalFor": [
+      "approval_required"
+    ],
+    "maxSteps": 40,
+    "runTimeoutMs": 300000,
+    "redactPatterns": []
+  },
+  "startedAt": "2026-09-24T14:21:32.871Z"
+}

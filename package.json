@@ -16,6 +16,7 @@
     "install:browsers": "playwright install chromium"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "dotenv": "^17.2.3",
     "playwright": "^1.63.0",
     "zod": "^4.1.13"

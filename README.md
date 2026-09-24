@@ -9,8 +9,8 @@ Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking de
 stand-in for the back-office systems this is really aimed at. Design rationale is in
 [PLAN.md](PLAN.md); the assignment write-up will be in `REPORT.md`.
 
-> **Status — PR 5 of 6.** Deterministic replay under policy, with a real human handoff. LLM
-> discovery lands in PR6.
+Design rationale and trade-offs: **[REPORT.md](REPORT.md)**. Evidence from real runs:
+**[`/evidence/examples/`](evidence/examples)**.
 
 ## Setup
 
@@ -70,6 +70,26 @@ npm test            # unit + browser tests
 npm run typecheck   # tsc --noEmit
 npm run probe       # surface-layer harness (development aid, not the product CLI)
 ```
+
+## Demo — the whole thread
+
+```bash
+docker compose up -d && npm run setup
+
+# 1. An LLM works out the flow, once, against the live app
+npm run cli -- discover \
+  --goal "Log in, then look up account 12678 and read its balance and account type" \
+  --capability lookup_balance_discovered \
+  --out capabilities/lookup_balance_discovered.v1.json \
+  --input accountId=12678
+#   RECORDED  lookup_balance_discovered v1.0.0   steps: 9   model calls: 11
+
+# 2. Replay it with an account the model never saw — no model in the loop
+npm run cli -- replay capabilities/lookup_balance_discovered.v1.json --input accountId=12345
+#   SUCCESS   balance = -2300   accountType = "CHECKING"   model calls: 0
+```
+
+`discover` needs `ANTHROPIC_API_KEY` in `.env`. Nothing else does.
 
 ## Demo — replay a capability
 
@@ -147,6 +167,33 @@ npm run cli -- replay capabilities/transfer_funds.v1.json \
   │   [p]roceed  you approve; automation performs the step
   │   [a]bort    stop the run
   └────────────────────────────────────────────────────────────────
+```
+
+## Demo — capabilities as agent-callable tools
+
+```bash
+npm run cli -- capabilities          # human-readable catalog
+npm run cli -- capabilities --json   # the tool schemas an agent would be given
+npm run cli -- invoke lookup_account_balance --input accountId=12678
+```
+
+The tool schema is **generated from the artifact**, so the advertised contract and the enforced
+one cannot drift apart. The description tells a calling agent what it gets back, whether the
+capability will stop for a human, and whether it is still a draft:
+
+```json
+{
+  "name": "transfer_funds",
+  "description": "Fill the ParaBank transfer form and reach the confirmation screen … Returns:
+                  confirmedAmount (string), confirmedFrom (string), confirmedTo (string).
+                  This capability requires a human to approve a step before it completes.",
+  "input_schema": {
+    "type": "object",
+    "properties": { "fromAccount": { "type": "string", "pattern": "^[0-9]{1,10}$" }, … },
+    "required": ["fromAccount", "toAccount", "amount"],
+    "additionalProperties": false
+  }
+}
 ```
 
 ## Escalation and control transfer
@@ -335,9 +382,11 @@ The `discover` / `replay` / `capabilities` CLI arrives in PRs 3–6.
 ```
 src/schema.ts    every typed contract: conditions, locators, actions, the capability
                  artifact, handlers, policy, observations, interventions, run results
+src/discovery.ts the LLM loop that produces an artifact — used once per capability
 src/replay.ts    the deterministic interpreter: steps, handlers, checkpoints, outputs
+src/catalog.ts   artifacts as agent-callable tools
 src/template.ts  {{inputs|secrets|vars|baseUrl}} resolution and output coercion
-src/cli.ts       validate | replay
+src/cli.ts       discover | replay | validate | capabilities | invoke
 src/parabank.ts  app-specific glue (re-authentication), injected at the edge
 src/surface.ts   the Surface port + PlaywrightSurface + condition evaluation
 src/locator.ts   candidate list -> exactly one visible element, or a refusal

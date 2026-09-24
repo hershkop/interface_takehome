@@ -1,0 +1,37 @@
+{
+  "runId": "replay-20260924T142319-lixug",
+  "phase": "replay",
+  "policy": {
+    "allowedOrigins": [
+      "http://localhost:18080"
+    ],
+    "allowedPaths": [
+      "/parabank/**"
+    ],
+    "allowedActions": [
+      "navigate",
+      "click",
+      "fill",
+      "select",
+      "wait",
+      "extract",
+      "assert"
+    ],
+    "blockedActions": [],
+    "requireApprovalFor": [
+      "approval_required"
+    ],
+    "maxSteps": 40,
+    "runTimeoutMs": 300000,
+    "redactPatterns": []
+  },
+  "capabilityId": "lookup_account_balance",
+  "capabilityVersion": "1.0.0",
+  "artifactStatus": "approved",
+  "risk": "safe",
+  "baseUrl": "http://localhost:18080/parabank",
+  "inputs": {
+    "accountId": "99999"
+  },
+  "startedAt": "2026-09-24T14:23:19.240Z"
+}
