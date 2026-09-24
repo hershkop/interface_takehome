@@ -15,6 +15,7 @@ import { createRedactor } from "../src/redact.js";
 import { Condition, Target } from "../src/schema.js";
 
 const headed = process.argv.includes("--headed");
+const wantTrace = process.argv.includes("--trace");
 const base = config.parabank.baseUrl;
 
 const target = (description: string, candidates: unknown[]) =>
@@ -37,7 +38,17 @@ async function main(): Promise<void> {
   const recorder = new EvidenceRecorder({ runId, phase: "replay", redact });
   await recorder.writeRunHeader({ probe: true, baseUrl: base, startedAt: new Date().toISOString() });
 
-  const surface = await PlaywrightSurface.launch({ headed, traceDir: recorder.directory });
+  if (wantTrace) {
+    process.stdout.write(
+      "\n  ! --trace writes a raw Playwright trace. It archives request bodies, cookies and DOM\n" +
+        "    snapshots, and the redactor cannot reach inside the archive. Do not commit it.\n\n",
+    );
+  }
+  const surface = await PlaywrightSurface.launch({
+    headed,
+    traceDir: recorder.directory,
+    trace: wantTrace ? "unredacted" : "off",
+  });
   let failures = 0;
 
   const check = async (label: string, ok: boolean, detail?: Record<string, unknown>) => {
@@ -118,6 +129,13 @@ async function main(): Promise<void> {
     await check("absent target reported as not found", missing.errorCode === "TARGET_NOT_FOUND", {
       errorCode: missing.errorCode,
     });
+
+    // The default rich failure signal: redacted, text, and the same view the agent reasons over.
+    const snapshotPath = await recorder.failureSnapshot(await surface.observe(2), {
+      failingTarget: "#does-not-exist",
+      attempts: missing.attempts,
+    });
+    await check("redacted failure snapshot written", Boolean(snapshotPath));
   } finally {
     const trace = await surface.close();
     if (trace) recorder.setTrace(trace);

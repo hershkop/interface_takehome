@@ -159,3 +159,93 @@ describe("describeCandidate", () => {
     expect(describeCandidate({ strategy: "coordinates", x: 1, y: 2 })).toBe("coordinates=(1, 2)");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regressions from PR2 review.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("returns the visible element, not the first DOM match (review #2)", () => {
+  it("skips a hidden duplicate that precedes the visible one", async () => {
+    // Counting visible matches but returning first() reported ok:true and handed back an
+    // element that can never be clicked. Hidden duplicates ahead of the real control are
+    // ordinary in legacy markup, so this failed as a mysterious timeout rather than a refusal.
+    await page.setContent(`
+      <button class="go" style="display:none">hidden</button>
+      <button class="go">visible</button>
+    `);
+    const r = await resolveTarget(page, target([{ strategy: "css", value: "button.go" }]), {
+      timeoutMs: 500,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(await r.locator.innerText()).toBe("visible");
+      expect(await r.locator.isVisible()).toBe(true);
+      // The real assertion: the returned locator is actually usable.
+      await r.locator.click({ timeout: 2_000 });
+    }
+  });
+
+  it("finds the visible match when several hidden ones precede it", async () => {
+    await page.setContent(`
+      <a class="x" style="display:none">one</a>
+      <a class="x" style="visibility:hidden">two</a>
+      <a class="x" href="#">three</a>
+    `);
+    const r = await resolveTarget(page, target([{ strategy: "css", value: "a.x" }]), {
+      timeoutMs: 500,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(await r.locator.innerText()).toBe("three");
+  });
+});
+
+describe("polls the whole candidate chain until the deadline (review #3)", () => {
+  it("waits for a control that is attached but not yet visible", async () => {
+    // waitFor({state:"attached"}) returned immediately for an already-attached hidden control,
+    // so a target that was about to become usable was rejected on the spot.
+    await page.setContent(`<button id="late" style="display:none">Later</button>`);
+    setTimeout(() => {
+      void page.evaluate(() => {
+        document.getElementById("late")!.style.display = "block";
+      });
+    }, 400);
+
+    const r = await resolveTarget(page, target([{ strategy: "css", value: "#late" }]), {
+      timeoutMs: 3_000,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.passes).toBeGreaterThan(1);
+  });
+
+  it("observes a later candidate that only appears mid-timeout", async () => {
+    // Previously only the first candidate ever waited, so a fallback rendered by a late AJAX
+    // response was never seen.
+    await page.setContent(`<div id="host"></div>`);
+    setTimeout(() => {
+      void page.evaluate(() => {
+        document.getElementById("host")!.innerHTML = '<button id="fallback">Go</button>';
+      });
+    }, 400);
+
+    const r = await resolveTarget(
+      page,
+      target([
+        { strategy: "role", role: "button", name: "Never appears" },
+        { strategy: "css", value: "#fallback" },
+      ]),
+      { timeoutMs: 3_000 },
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.candidateIndex).toBe(1);
+  });
+
+  it("still gives up at the deadline rather than hanging", async () => {
+    await page.setContent(`<div>nothing</div>`);
+    const started = Date.now();
+    const r = await resolveTarget(page, target([{ strategy: "css", value: "#never" }]), {
+      timeoutMs: 600,
+    });
+    expect(r.ok).toBe(false);
+    expect(Date.now() - started).toBeLessThan(4_000);
+  });
+});

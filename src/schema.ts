@@ -524,7 +524,15 @@ export const EvidenceSummary = z.object({
   directory: z.string(),
   eventLog: z.string(),
   trace: z.string().optional(),
+  /**
+   * True when a raw Playwright trace was written. Traces capture request bodies, cookies, and
+   * DOM snapshots, and the redactor cannot reach inside the archive — so producing one is an
+   * explicit opt-in and the run record says so rather than leaving it implied.
+   */
+  traceUnredacted: z.boolean().default(false),
   screenshots: z.array(z.string()).default([]),
+  /** Redacted ARIA/URL/alert capture written on failure. The default rich failure signal. */
+  failureSnapshot: z.string().optional(),
   /**
    * Replay asserts this is 0. It turns "no LLM in the decision loop" from a claim in the
    * write-up into a fact in the run record.

@@ -16,6 +16,18 @@ import type { Condition, Observation } from "./schema.js";
 import { resolveTarget, explainFailure, type AttemptLog } from "./locator.js";
 import type { Target } from "./schema.js";
 
+/** What was under the cursor after a coordinate click, so a durable locator can be derived. */
+export interface CoordinateClickOutcome extends ActionOutcome {
+  element?: {
+    tag: string;
+    role: string | null;
+    name: string | null;
+    id: string | null;
+    testId: string | null;
+    text: string | null;
+  };
+}
+
 export interface ActionOutcome {
   ok: boolean;
   /** Present when the action read something off the page. */
@@ -37,6 +49,17 @@ export interface Surface {
   select(target: Target, value: string): Promise<ActionOutcome>;
   waitFor(condition: Condition, timeoutMs: number): Promise<ActionOutcome>;
   extract(target: Target, attribute?: string): Promise<ActionOutcome>;
+  /**
+   * Click raw viewport coordinates, then report what was under the cursor.
+   *
+   * This is the discovery escape hatch, and it is deliberately not reachable from replay: the
+   * resolver refuses coordinate candidates outright. The asymmetry is the point. A model
+   * working from a screenshot sometimes has no other way to act on a control, so discovery
+   * needs to be *able* to click a point — but what gets recorded must be a real locator, which
+   * is why this returns the element's role, name, and id rather than just succeeding.
+   * Discovery converts that into locator candidates; if it cannot, the artifact stays a draft.
+   */
+  clickAt(x: number, y: number): Promise<CoordinateClickOutcome>;
   verify(condition: Condition): Promise<boolean>;
   currentUrl(): string;
   /** Returns the trace path when tracing was enabled, so the caller can record it. */
@@ -140,8 +163,26 @@ export function describeCondition(condition: Condition): string {
 
 export interface PlaywrightSurfaceOptions {
   headed?: boolean;
-  /** Directory to write the trace into. Tracing is off when omitted. */
+  /**
+   * Where to write a Playwright trace. Tracing is OFF unless `trace` is also set to
+   * "unredacted", because a trace is a sink the redactor cannot reach into.
+   */
   traceDir?: string;
+  /**
+   * "off" (default) or "unredacted".
+   *
+   * A Playwright trace archives request bodies, response bodies, cookies, and serialised DOM
+   * snapshots. On this target that demonstrably includes `username=john&password=demo`, the
+   * JSESSIONID cookie, customer names, and account balances. Redaction in this system happens
+   * at the evidence sink, and there is no sink to intercept inside a zip archive — so a trace
+   * cannot be made safe by the mechanism everything else relies on.
+   *
+   * Rather than pretend otherwise, tracing is opt-in, the caller is warned, and the run record
+   * carries `traceUnredacted: true`. The default rich failure signal is the redacted ARIA
+   * snapshot written by EvidenceRecorder.failureSnapshot(), which satisfies the same need
+   * without persisting credentials.
+   */
+  trace?: "off" | "unredacted";
   defaultTimeoutMs?: number;
 }
 
@@ -157,13 +198,14 @@ export class PlaywrightSurface implements Surface {
   static async launch(options: PlaywrightSurfaceOptions = {}): Promise<PlaywrightSurface> {
     const browser = await chromium.launch({ headless: !options.headed });
     const context = await browser.newContext();
-    if (options.traceDir) {
+    const tracing = options.trace === "unredacted" && Boolean(options.traceDir);
+    if (tracing) {
       await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
     }
     const page = await context.newPage();
     const timeout = options.defaultTimeoutMs ?? 10_000;
     page.setDefaultTimeout(timeout);
-    return new PlaywrightSurface(browser, context, page, options.traceDir, timeout);
+    return new PlaywrightSurface(browser, context, page, tracing ? options.traceDir : undefined, timeout);
   }
 
   /**
@@ -293,6 +335,38 @@ export class PlaywrightSurface implements Surface {
         error: message(err),
         attempts: resolution.attempts,
       };
+    }
+  }
+
+  /**
+   * Coordinate click. See the interface docs for why this exists and why replay cannot use it.
+   *
+   * The element description comes from `document.elementFromPoint`, read in the page. Role is
+   * approximated from the explicit `role` attribute or the tag, which is enough for discovery
+   * to propose a role+name candidate and let the recorder verify it resolves uniquely.
+   */
+  async clickAt(x: number, y: number): Promise<CoordinateClickOutcome> {
+    try {
+      const element = await this.page.evaluate(
+        ({ px, py }) => {
+          const el = document.elementFromPoint(px, py) as HTMLElement | null;
+          if (!el) return null;
+          const labelled = el.getAttribute("aria-label") ?? el.getAttribute("title");
+          return {
+            tag: el.tagName.toLowerCase(),
+            role: el.getAttribute("role"),
+            name: labelled ?? ((el.textContent ?? "").trim().slice(0, 80) || null),
+            id: el.id || null,
+            testId: el.getAttribute("data-testid"),
+            text: ((el.textContent ?? "").trim().slice(0, 80) || null),
+          };
+        },
+        { px: x, py: y },
+      );
+      await this.page.mouse.click(x, y);
+      return { ok: true, element: element ?? undefined };
+    } catch (err) {
+      return { ok: false, error: message(err) };
     }
   }
 

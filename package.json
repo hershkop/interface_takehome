@@ -12,7 +12,8 @@
     "cli": "tsx src/cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "probe": "tsx scripts/probe.ts"
+    "probe": "tsx scripts/probe.ts",
+    "install:browsers": "playwright install chromium"
   },
   "dependencies": {
     "dotenv": "^17.2.3",

@@ -18,10 +18,16 @@ Requires Node 20+ and Docker.
 
 ```bash
 npm install
+npm run install:browsers    # downloads Chromium — npm install does NOT do this
 cp .env.example .env        # optional; the defaults work as-is
 docker compose up -d        # starts ParaBank
 npm run setup               # seeds it and prints the demo account IDs
 ```
+
+`npm run install:browsers` is not optional and `npm install` will not do it for you: the
+Playwright *package* installs from npm, but the browser binary is a separate download. Without
+it, `npm test` and `npm run probe` both fail. On Linux or CI, use
+`npx playwright install --with-deps chromium` to pull the system libraries too.
 
 `npm run setup` resets ParaBank to fixed fixture state via
 `POST /services/bank/initializeDB` and verifies the accounts the demo capabilities use. It
@@ -72,12 +78,36 @@ than only against synthetic pages, and so you can look at a real evidence direct
 
 ```
 evidence/probe-<timestamp>/
-├── run.json            run metadata
-├── events.jsonl        redacted structured events
-├── result.json         the four-status RunResult
-├── 001-overview.png    screenshots, sequence-numbered
-└── trace.zip           Playwright trace
+├── run.json                 run metadata
+├── events.jsonl             redacted structured events
+├── result.json              the four-status RunResult
+├── 001-overview.png         screenshots, sequence-numbered, sensitive regions masked
+└── failure-snapshot.json    redacted ARIA capture — the rich failure signal
 ```
+
+### Evidence has three sinks, and only one of them is a string
+
+Redaction happens at the sink, but not every sink is text, so each is handled differently.
+
+| Sink | Treatment |
+|---|---|
+| **Events, results, failure snapshots** | JSON, passed through the redactor before writing |
+| **Screenshots** | Masked *at capture time* — a rendered pixel cannot be redacted afterwards. Password inputs and anything marked `data-sensitive` are painted over by Playwright before the PNG exists |
+| **Playwright traces** | **Off by default.** Opt in with `npm run probe -- --trace` |
+
+A trace archives request bodies, response bodies, cookies, and serialised DOM snapshots. On
+this target that provably includes `username=john&password=demo`, the `JSESSIONID` cookie,
+customer names, and balances — and the redactor cannot reach inside a zip. So rather than ship
+a sink that quietly defeats the redaction everything else relies on, tracing is opt-in, warns
+when enabled, and sets `traceUnredacted: true` in the run record.
+
+The default rich failure signal is `failure-snapshot.json` instead: a redacted ARIA capture,
+which is text (so it redacts), and is the same view the agent reasons over (so it is more
+useful for debugging a locator failure than a screenshot anyway).
+
+`test/evidence-secrets.test.ts` scans *every* byte of *every* file a run produces for
+configured secrets, because the first version of this claim was made by grepping the JSON and
+missing the archive.
 
 The `discover` / `replay` / `capabilities` CLI arrives in PRs 3–6.
 

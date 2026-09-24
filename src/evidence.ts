@@ -12,10 +12,19 @@
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Page } from "playwright";
-import type { EvidenceSummary, RunResult } from "./schema.js";
+import type { EvidenceSummary, Observation, RunResult } from "./schema.js";
 import { redactDeep, type Redactor } from "./redact.js";
 
 export type RunPhase = "discovery" | "replay" | "human";
+
+/**
+ * Masked in every screenshot unless a caller overrides. Password inputs first, plus an opt-in
+ * hook (`data-sensitive`) for anything an artifact author knows is regulated on a given screen.
+ */
+export const DEFAULT_MASK_SELECTORS: readonly string[] = [
+  'input[type="password"]',
+  "[data-sensitive]",
+];
 
 export interface EvidenceEvent {
   timestamp: string;
@@ -52,6 +61,7 @@ export class EvidenceRecorder {
   private readonly screenshots: string[] = [];
   private modelCalls = 0;
   private tracePath: string | undefined;
+  private failureSnapshotPath: string | undefined;
   private screenshotSeq = 0;
   private ready: Promise<void>;
 
@@ -77,20 +87,63 @@ export class EvidenceRecorder {
   }
 
   /**
-   * Full-page screenshot. Named with a monotonic sequence so the files sort in execution order
-   * even when several share a step.
+   * Full-page screenshot, with sensitive regions masked out before the image is written.
+   *
+   * A screenshot is a sink the string redactor cannot reach: whatever is on screen is in the
+   * file. Masking is therefore done at capture time by Playwright, not after the fact — there
+   * is no "after the fact" for a rendered pixel.
+   *
+   * Named with a monotonic sequence so files sort in execution order even when several share
+   * a step.
    */
-  async screenshot(page: Page, label: string): Promise<string> {
+  async screenshot(
+    page: Page,
+    label: string,
+    options: { mask?: readonly string[] } = {},
+  ): Promise<string> {
     await this.ready;
     const seq = String(++this.screenshotSeq).padStart(3, "0");
     const safeLabel = label.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 60);
     const path = join(this.directory, `${seq}-${safeLabel}.png`);
-    await page.screenshot({ path, fullPage: true });
+    const selectors = options.mask ?? DEFAULT_MASK_SELECTORS;
+    await page.screenshot({
+      path,
+      fullPage: true,
+      mask: selectors.map((selector) => page.locator(selector)),
+      maskColor: "#000000",
+    });
     this.screenshots.push(path);
     return path;
   }
 
-  /** Records where the Playwright trace was written, so the summary can point at it. */
+  /**
+   * The default rich failure signal: a redacted capture of what the agent could see.
+   *
+   * This exists so that "produce a richer signal on failure" does not have to mean "persist an
+   * unredacted Playwright trace". An ARIA snapshot is text, so it goes through the same
+   * redactor as everything else, and it is the same representation the agent reasons over —
+   * which makes it more useful for debugging a locator failure than a screenshot anyway.
+   */
+  async failureSnapshot(observation: Observation, context: Record<string, unknown> = {}): Promise<string> {
+    await this.ready;
+    const path = join(this.directory, "failure-snapshot.json");
+    const payload = {
+      capturedAt: new Date().toISOString(),
+      url: observation.url,
+      title: observation.title,
+      alerts: observation.alerts,
+      ariaSnapshot: observation.ariaSnapshot,
+      ...context,
+    };
+    await writeFile(path, `${JSON.stringify(redactDeep(payload, this.redact), null, 2)}\n`, "utf8");
+    this.failureSnapshotPath = path;
+    return path;
+  }
+
+  /**
+   * Records where a Playwright trace was written. Callers only reach this when tracing was
+   * explicitly opted into; the summary flags it as unredacted so nobody has to infer that.
+   */
   setTrace(path: string): void {
     this.tracePath = path;
   }
@@ -113,7 +166,9 @@ export class EvidenceRecorder {
       directory: this.directory,
       eventLog: this.eventLogPath,
       trace: this.tracePath,
+      traceUnredacted: this.tracePath !== undefined,
       screenshots: [...this.screenshots],
+      failureSnapshot: this.failureSnapshotPath,
       modelCalls: this.modelCalls,
     };
   }

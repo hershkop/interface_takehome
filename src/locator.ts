@@ -10,8 +10,16 @@ import type { Locator, Page } from "playwright";
 import type { LocatorCandidate, Target } from "./schema.js";
 
 export type ResolutionOutcome =
-  | { ok: true; locator: Locator; candidate: LocatorCandidate; candidateIndex: number; attempts: AttemptLog[] }
-  | { ok: false; reason: "not_found" | "ambiguous"; attempts: AttemptLog[] };
+  | {
+      ok: true;
+      locator: Locator;
+      candidate: LocatorCandidate;
+      candidateIndex: number;
+      attempts: AttemptLog[];
+      /** How many times the candidate chain was polled before this resolved. */
+      passes: number;
+    }
+  | { ok: false; reason: "not_found" | "ambiguous"; attempts: AttemptLog[]; passes: number };
 
 export interface AttemptLog {
   candidateIndex: number;
@@ -71,17 +79,22 @@ function buildLocator(page: Page, c: LocatorCandidate): Locator | null {
  * Counting DOM matches rather than visible ones would resolve to elements a human operator
  * cannot see, which is exactly what this system is supposed to imitate.
  */
-async function countVisible(locator: Locator): Promise<number> {
+async function findUniqueVisible(
+  locator: Locator,
+): Promise<{ visibleCount: number; index: number }> {
   const total = await locator.count();
-  if (total === 0) return 0;
+  if (total === 0) return { visibleCount: 0, index: -1 };
 
-  let visible = 0;
+  let visibleCount = 0;
+  let index = -1;
   for (let i = 0; i < total; i++) {
-    if (await locator.nth(i).isVisible()) visible++;
+    if (!(await locator.nth(i).isVisible())) continue;
+    visibleCount++;
+    if (index < 0) index = i;
     // Two is already ambiguous; no need to price the rest.
-    if (visible > 1) return visible;
+    if (visibleCount > 1) return { visibleCount, index: -1 };
   }
-  return visible;
+  return { visibleCount, index };
 }
 
 /**
@@ -98,59 +111,92 @@ async function countVisible(locator: Locator): Promise<number> {
 export async function resolveTarget(
   page: Page,
   target: Target,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; pollIntervalMs?: number } = {},
 ): Promise<ResolutionOutcome> {
   const timeoutMs = options.timeoutMs ?? 5_000;
-  const attempts: AttemptLog[] = [];
-  let sawAmbiguous = false;
+  const pollIntervalMs = options.pollIntervalMs ?? 150;
+  const deadline = Date.now() + timeoutMs;
 
-  for (const [candidateIndex, candidate] of target.candidates.entries()) {
-    const describe = describeCandidate(candidate);
+  let attempts: AttemptLog[] = [];
+  let passes = 0;
 
-    if (candidate.strategy === "coordinates") {
-      // Coordinates cannot be verified — there is no way to ask "is this the right control?".
-      // The schema already bars them from approved artifacts; the resolver refuses to treat
-      // them as a resolution at all, so a draft replay fails loudly rather than mis-clicking.
-      attempts.push({
-        candidateIndex,
-        strategy: candidate.strategy,
-        describe,
-        visibleMatches: 0,
-        error: "coordinate targeting is not resolvable; re-record this step",
-      });
-      continue;
+  // The whole chain is retried until the shared deadline, not just the first candidate.
+  // Enterprise pages routinely attach a control before it becomes visible, and render a
+  // fallback control only after an AJAX call lands. Checking each candidate once would reject
+  // a target that was about to become perfectly resolvable — which is precisely the transient
+  // slowness this system has to tolerate.
+  for (;;) {
+    passes++;
+    attempts = [];
+    let sawAmbiguous = false;
+
+    for (const [candidateIndex, candidate] of target.candidates.entries()) {
+      const describe = describeCandidate(candidate);
+
+      if (candidate.strategy === "coordinates") {
+        // Coordinates cannot be verified — there is no way to ask "is this the right control?".
+        // Discovery can still *perform* a coordinate click through Surface.clickAt() and then
+        // derive a real locator from what was under the cursor; what it must never do is
+        // replay one. See the note on Surface.clickAt.
+        attempts.push({
+          candidateIndex,
+          strategy: candidate.strategy,
+          describe,
+          visibleMatches: 0,
+          error: "coordinate targeting is not resolvable on replay; re-record this step",
+        });
+        continue;
+      }
+
+      const locator = buildLocator(page, candidate);
+      if (!locator) continue;
+
+      try {
+        const { visibleCount, index } = await findUniqueVisible(locator);
+        attempts.push({
+          candidateIndex,
+          strategy: candidate.strategy,
+          describe,
+          visibleMatches: visibleCount,
+        });
+
+        if (visibleCount === 1) {
+          // nth(index), not first(). The unique VISIBLE match is not necessarily the first DOM
+          // match: a hidden duplicate ahead of it is ordinary in legacy markup, and returning
+          // first() there hands back an element that can never be clicked.
+          return {
+            ok: true,
+            locator: locator.nth(index),
+            candidate,
+            candidateIndex,
+            attempts,
+            passes,
+          };
+        }
+        if (visibleCount > 1) sawAmbiguous = true;
+      } catch (err) {
+        // A malformed CSS selector or an unknown ARIA role lands here. It disqualifies the
+        // candidate, not the target.
+        attempts.push({
+          candidateIndex,
+          strategy: candidate.strategy,
+          describe,
+          visibleMatches: 0,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
-    const locator = buildLocator(page, candidate);
-    if (!locator) continue;
-
-    try {
-      // Give the first candidate a chance to appear; later ones are checked immediately, since
-      // by then we have already waited once for this target.
-      if (candidateIndex === 0) {
-        await locator.first().waitFor({ state: "attached", timeout: timeoutMs }).catch(() => {});
-      }
-      const visibleMatches = await countVisible(locator);
-      attempts.push({ candidateIndex, strategy: candidate.strategy, describe, visibleMatches });
-
-      if (visibleMatches === 1) {
-        return { ok: true, locator: locator.first(), candidate, candidateIndex, attempts };
-      }
-      if (visibleMatches > 1) sawAmbiguous = true;
-    } catch (err) {
-      // A malformed CSS selector or an unknown ARIA role lands here. It disqualifies the
-      // candidate, not the target.
-      attempts.push({
-        candidateIndex,
-        strategy: candidate.strategy,
-        describe,
-        visibleMatches: 0,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    if (Date.now() >= deadline) {
+      return {
+        ok: false,
+        reason: sawAmbiguous ? "ambiguous" : "not_found",
+        attempts,
+        passes,
+      };
     }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
-
-  return { ok: false, reason: sawAmbiguous ? "ambiguous" : "not_found", attempts };
 }
 
 /** One-line summary of why a target did not resolve, safe to put in a RunError. */
