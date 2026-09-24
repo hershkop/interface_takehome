@@ -24,9 +24,16 @@ export interface CatalogEntry {
   artifact: CapabilityArtifact;
 }
 
-/** Loads every valid artifact in a directory. Invalid ones are reported, not silently skipped. */
+/**
+ * Loads every valid artifact in a directory. Invalid ones are reported, not silently skipped —
+ * a capability an agent cannot see and nobody was told about is the worst of both.
+ *
+ * `agentFacing` drops drafts from the result. What a human browsing the catalog should see and
+ * what an agent should be handed as callable tools are not the same list.
+ */
 export async function loadCatalog(
   directory: string,
+  options: { agentFacing?: boolean } = {},
 ): Promise<{ entries: CatalogEntry[]; invalid: Array<{ path: string; reason: string }> }> {
   const entries: CatalogEntry[] = [];
   const invalid: Array<{ path: string; reason: string }> = [];
@@ -61,7 +68,10 @@ export async function loadCatalog(
       artifact: parsed.data,
     });
   }
-  return { entries, invalid };
+  return {
+    entries: options.agentFacing ? entries.filter((e) => e.status === "approved") : entries,
+    invalid,
+  };
 }
 
 /**
@@ -121,11 +131,26 @@ export async function invoke(
   directory: string,
   capabilityId: string,
   args: Record<string, unknown>,
-  options: Omit<ReplayOptions, "artifact" | "inputs"> & { policy: Policy },
-): Promise<RunResult | { notFound: string[] }> {
+  options: Omit<ReplayOptions, "artifact" | "inputs"> & {
+    policy: Policy;
+    /** Required to run a draft. Absent, a draft is refused rather than warned about. */
+    allowDraft?: boolean;
+  },
+): Promise<RunResult | { notFound: string[] } | { refused: string }> {
   const { entries } = await loadCatalog(directory);
   const entry = entries.find((e) => e.capabilityId === capabilityId);
   if (!entry) return { notFound: entries.map((e) => e.capabilityId) };
+
+  // `draft` has to mean something. A warning in a description is documentation; an agent reads
+  // the schema and calls the tool. A capability that has never been reviewed and has no error
+  // handling should not be invocable unattended just because it loaded successfully.
+  if (entry.status === "draft" && !options.allowDraft) {
+    return {
+      refused:
+        `"${capabilityId}" is a draft and is not approved for unattended use. ` +
+        `Review it, set metadata.status to "approved", or pass allowDraft to run it anyway.`,
+    };
+  }
 
   return replay({ ...options, artifact: entry.artifact, inputs: args });
 }

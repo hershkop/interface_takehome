@@ -1,5 +1,5 @@
 {
-  "runId": "replay-20260924T142320-154ce",
+  "runId": "replay-20260924T150944-galbr",
   "phase": "replay",
   "policy": {
     "allowedOrigins": [
@@ -10,30 +10,37 @@
     ],
     "allowedActions": [
       "navigate",
-      "click",
-      "fill",
-      "select",
       "wait",
       "extract",
       "assert"
     ],
-    "blockedActions": [],
+    "blockedActions": [
+      "click",
+      "fill",
+      "select"
+    ],
     "requireApprovalFor": [
       "approval_required"
     ],
-    "maxSteps": 40,
-    "runTimeoutMs": 300000,
+    "riskyControls": [
+      "^transfer$",
+      "^pay$",
+      "^submit",
+      "confirm",
+      "^delete",
+      "withdraw"
+    ],
+    "maxSteps": 25,
+    "runTimeoutMs": 120000,
     "redactPatterns": []
   },
-  "capabilityId": "transfer_funds",
+  "capabilityId": "lookup_account_balance",
   "capabilityVersion": "1.0.0",
   "artifactStatus": "approved",
   "risk": "safe",
   "baseUrl": "http://localhost:18080/parabank",
   "inputs": {
-    "fromAccount": "12345",
-    "toAccount": "12678",
-    "amount": "25"
+    "accountId": "12678"
   },
-  "startedAt": "2026-09-24T14:23:20.712Z"
+  "startedAt": "2026-09-24T15:09:44.385Z"
 }

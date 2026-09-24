@@ -172,10 +172,17 @@ npm run cli -- replay capabilities/transfer_funds.v1.json \
 ## Demo — capabilities as agent-callable tools
 
 ```bash
-npm run cli -- capabilities          # human-readable catalog
-npm run cli -- capabilities --json   # the tool schemas an agent would be given
+npm run cli -- capabilities          # human-readable catalog — includes drafts
+npm run cli -- capabilities --json   # what an agent is given — approved only
 npm run cli -- invoke lookup_account_balance --input accountId=12678
 ```
+
+**A draft is not callable.** `invoke` refuses a capability still marked `draft` unless
+`--allow-draft` is passed, and `--json` omits drafts altogether. A warning in a description is
+documentation; an agent reads the schema and calls the tool.
+
+Exit codes are the same for `invoke` as for `replay`: `0` success or business outcome, `2`
+escalated, `1` failure.
 
 The tool schema is **generated from the artifact**, so the advertised contract and the enforced
 one cannot drift apart. The description tells a calling agent what it gets back, whether the

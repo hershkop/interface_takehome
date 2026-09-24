@@ -28,5 +28,8 @@ export function defaultPolicy(): Policy {
     allowedOrigins: [origin(config.parabank.baseUrl)],
     allowedPaths: ["/parabank/**"],
     redactPatterns: [],
+    // Controls that move money. Replay reads risk off the artifact; discovery has no artifact
+    // yet, so this is what stops an exploring model committing a transaction.
+    riskyControls: ["^transfer$", "^pay$", "^submit", "confirm", "^delete", "withdraw"],
   });
 }

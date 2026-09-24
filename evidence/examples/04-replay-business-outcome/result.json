@@ -5,9 +5,9 @@
     "requestedAccountId": "99999"
   },
   "evidence": {
-    "runId": "replay-20260924T142319-lixug",
-    "directory": "evidence/replay-20260924T142319-lixug",
-    "eventLog": "evidence/replay-20260924T142319-lixug/events.jsonl",
+    "runId": "replay-20260924T150941-x8bbk",
+    "directory": "evidence/replay-20260924T150941-x8bbk",
+    "eventLog": "evidence/replay-20260924T150941-x8bbk/events.jsonl",
     "traceUnredacted": false,
     "screenshots": [],
     "modelCalls": 0

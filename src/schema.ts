@@ -272,14 +272,38 @@ export const OutputSource = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("variable"), name: z.string().min(1) }),
 ]);
 
-export const OutputDefinition = z.object({
-  type: z.enum(["string", "number", "boolean"]),
-  description: z.string().optional(),
-  source: OutputSource,
-  coerce: Coercion.optional(),
-  /** A missing output is usually a bug, so failing is the default. */
-  onMissing: z.enum(["fail", "null"]).default("fail"),
-});
+/** What each coercion actually produces. A declaration that disagrees is a lie in the contract. */
+const COERCION_YIELDS: Record<string, "string" | "number"> = {
+  trim: "string",
+  currency: "number",
+  int: "number",
+  number: "number",
+};
+
+export const OutputDefinition = z
+  .object({
+    type: z.enum(["string", "number", "boolean"]),
+    description: z.string().optional(),
+    source: OutputSource,
+    coerce: Coercion.optional(),
+    /** A missing output is usually a bug, so failing is the default. */
+    onMissing: z.enum(["fail", "null"]).default("fail"),
+  })
+  .superRefine((output, ctx) => {
+    // `currency` returns a number whatever the declaration says, so an output declared
+    // `string` with `coerce: "currency"` advertises a type it will never return — and the
+    // catalog repeats that lie to every calling agent. Caught here rather than in the
+    // recorder, so a hand-authored artifact cannot make the same mistake.
+    if (!output.coerce) return;
+    const produced = COERCION_YIELDS[output.coerce];
+    if (produced && produced !== output.type) {
+      ctx.addIssue({
+        code: "custom",
+        message: `coerce "${output.coerce}" produces a ${produced}, but the output is declared ${output.type}`,
+        path: ["type"],
+      });
+    }
+  });
 export type OutputDefinition = z.infer<typeof OutputDefinition>;
 
 // ─── Steps ─────────────────────────────────────────────────────────────────────
@@ -481,6 +505,35 @@ export const Policy = z.object({
   blockedActions: z.array(ActionType).default([]),
   /** Steps whose risk resolves to this class escalate instead of executing. */
   requireApprovalFor: z.array(RiskClass).default(["approval_required"]),
+  /**
+   * Regexes matched against a control's accessible name, description, or selector.
+   *
+   * Replay learns an action's risk from the artifact. Discovery has no artifact yet — it is
+   * producing one — so without this it has no way to know that the button it is about to click
+   * moves money. An exploring model operating a bank's back office must not be able to commit
+   * an irreversible transaction because nobody had written the flow down yet.
+   *
+   * A match classifies the proposed action `approval_required`, which then goes through exactly
+   * the same gate replay uses.
+   */
+  riskyControls: z
+    .array(z.string())
+    .default([])
+    .superRefine((patterns, ctx) => {
+      for (const [index, pattern] of patterns.entries()) {
+        try {
+          new RegExp(pattern, "i");
+        } catch (err) {
+          ctx.addIssue({
+            code: "custom",
+            message: `riskyControls[${index}] is not a valid regular expression: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+            path: [index],
+          });
+        }
+      }
+    }),
   maxSteps: z.number().int().positive().default(40),
   runTimeoutMs: z.number().int().positive().default(300_000),
   /**

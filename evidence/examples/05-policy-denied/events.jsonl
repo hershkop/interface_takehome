@@ -1,5 +1,0 @@
-{"timestamp":"2026-09-24T14:23:22.622Z","runId":"replay-20260924T142322-nvp8d","phase":"replay","type":"step.start","stepId":"open_login","stepIndex":0,"actionType":"navigate","detail":{"attempt":1}}
-{"timestamp":"2026-09-24T14:23:22.785Z","runId":"replay-20260924T142322-nvp8d","phase":"replay","type":"step.ok","stepId":"open_login","stepIndex":0,"actionType":"navigate","durationMs":163}
-{"timestamp":"2026-09-24T14:23:22.786Z","runId":"replay-20260924T142322-nvp8d","phase":"replay","type":"step.start","stepId":"enter_username","stepIndex":1,"actionType":"fill","detail":{"attempt":1}}
-{"timestamp":"2026-09-24T14:23:22.788Z","runId":"replay-20260924T142322-nvp8d","phase":"replay","type":"policy.denied","detail":{"reason":"action type \"fill\" is blocked by policy"}}
-{"timestamp":"2026-09-24T14:23:22.789Z","runId":"replay-20260924T142322-nvp8d","phase":"replay","type":"policy.denied","stepId":"enter_username","stepIndex":1,"actionType":"fill","detail":{"reason":"action type \"fill\" is blocked by policy"}}

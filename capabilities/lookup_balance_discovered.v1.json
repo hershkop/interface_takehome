@@ -7,7 +7,7 @@
     "description": "Log in, then look up account 12678 and read its current balance and account type from the account detail screen.",
     "status": "draft",
     "risk": "safe",
-    "recordedAt": "2026-09-24T14:22:28.874Z",
+    "recordedAt": "2026-09-24T15:05:24.222Z",
     "recordedBy": "llm",
     "model": "claude-opus-5"
   },
@@ -24,7 +24,7 @@
   },
   "outputs": {
     "balance": {
-      "type": "string",
+      "type": "number",
       "source": {
         "kind": "variable",
         "name": "balance"
@@ -49,7 +49,7 @@
         "action": "navigate",
         "url": "{{baseUrl}}/index.htm"
       },
-      "rationale": "The allowlist indicates the application is hosted at localhost:18080, so open the ParaBank index there."
+      "rationale": "Open the locally hosted ParaBank instance, which is the allowed origin."
     },
     {
       "id": "fill_1",
@@ -65,7 +65,7 @@
         },
         "value": "{{secrets.parabankUsername}}"
       },
-      "rationale": "Enter the username; the field has no accessible name, so I target it by its name attribute."
+      "rationale": "Enter the username; the field has no accessible name so I target it by its name attribute."
     },
     {
       "id": "fill_2",
@@ -81,7 +81,7 @@
         },
         "value": "{{secrets.parabankPassword}}"
       },
-      "rationale": "Enter the password; this field also lacks an accessible name, so I target it by its name attribute."
+      "rationale": "Enter the password; the field has no accessible name so I target it by its name attribute."
     },
     {
       "id": "click_3",
@@ -99,23 +99,10 @@
           ]
         }
       },
-      "rationale": "Submit the login form using the button's accessible name."
+      "rationale": "Submit the login form using the labeled Log In button."
     },
     {
-      "id": "wait_4",
-      "action": {
-        "action": "wait",
-        "condition": {
-          "kind": "text",
-          "value": "{{inputs.accountId}}",
-          "visible": true
-        },
-        "timeoutMs": 10000
-      },
-      "rationale": "The overview table body has no rows yet; wait for the account number to render before clicking it."
-    },
-    {
-      "id": "click_5",
+      "id": "click_4",
       "action": {
         "action": "click",
         "target": {
@@ -130,10 +117,10 @@
           ]
         }
       },
-      "rationale": "Open the detail screen for the target account via its link, identified by the account number as accessible name."
+      "rationale": "Open the detail screen for the target account by clicking its link in the Accounts Overview table."
     },
     {
-      "id": "wait_6",
+      "id": "wait_5",
       "action": {
         "action": "wait",
         "condition": {
@@ -143,10 +130,10 @@
         },
         "timeoutMs": 10000
       },
-      "rationale": "The Account Details cells are blank pending an async fetch; wait for the account number value to render."
+      "rationale": "The detail cells are populated asynchronously; wait until the account number value actually appears before reading balance and type."
     },
     {
-      "id": "extract_7",
+      "id": "extract_6",
       "action": {
         "action": "extract",
         "target": {
@@ -159,10 +146,10 @@
         },
         "as": "balance"
       },
-      "rationale": "Capture the current balance from the Account Details table; the cell has no accessible name, so I target it by its id."
+      "rationale": "Capture the current balance from the Account Details table; the value cell has no accessible name, so I target its id."
     },
     {
-      "id": "extract_8",
+      "id": "extract_7",
       "action": {
         "action": "extract",
         "target": {
@@ -175,7 +162,7 @@
         },
         "as": "accountType"
       },
-      "rationale": "Capture the account type from the Account Details table; the cell has no accessible name, so I target it by its id."
+      "rationale": "Capture the account type from the Account Details table; the value cell has no accessible name, so I target its id."
     }
   ],
   "handlers": [],

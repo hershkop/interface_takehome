@@ -123,6 +123,29 @@ export class PolicyGuard {
     return this.policy.requireApprovalFor.includes(risk);
   }
 
+  /**
+   * Classifies a control the model is about to act on.
+   *
+   * Replay learns risk from the artifact. Discovery is *producing* the artifact, so it has no
+   * such declaration — this is the only thing standing between an exploring model and an
+   * irreversible transaction. Matched case-insensitively against whatever identifies the
+   * control: its accessible name, its description, or its selector.
+   */
+  classifyControl(descriptors: ReadonlyArray<string | undefined>): RiskClass {
+    for (const pattern of this.policy.riskyControls) {
+      let re: RegExp;
+      try {
+        re = new RegExp(pattern, "i");
+      } catch {
+        continue; // Validated at policy load; a survivor here is not worth crashing a run for.
+      }
+      for (const descriptor of descriptors) {
+        if (descriptor && re.test(descriptor)) return "approval_required";
+      }
+    }
+    return "safe";
+  }
+
   /** Counts a step and enforces the step ceiling. */
   countStep(): PolicyDecision {
     this.steps++;

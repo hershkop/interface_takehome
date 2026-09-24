@@ -369,7 +369,21 @@ and the type checker enforces that at every call site.
 
 ### Risky and irreversible actions
 
-Classified per step, inherited from the capability when a step does not override. `blocked` is
+**Replay** reads an action's risk from the artifact: classified per step, inherited from the
+capability when a step does not override.
+
+**Discovery has no artifact** — it is producing one — so it infers risk instead, from
+`Policy.riskyControls`: regexes matched against a control's accessible name, description, or
+selector. A match routes the proposed action through the same approval gate replay uses. With no
+operator channel the action is refused outright and the model is told why, so an exploring
+agent cannot commit an irreversible transaction merely because nobody was watching.
+
+`/evidence/examples/02-discovery-refused-irreversible` is that gate firing: the model filled a
+transfer form, was refused the submit, and declined to bypass it by POSTing to `transfer.htm`
+directly — reasoning that doing so "would perform the same irreversible money movement while
+evading the approval check".
+
+ `blocked` is
 absolute — no policy can opt into running it. Everything else is policy's decision via
 `requireApprovalFor`, so a cautious tenant can gate `safe` and a trusting one can gate nothing.
 
@@ -440,6 +454,11 @@ the weakest part of the submission**: the token implies a capability that does n
 
 **Branches, loops, conditionals in artifacts.** v1 is linear. Handlers cover the exceptional
 paths that matter without a DAG.
+
+**Promotion out of `draft`.** A discovered capability is refused by `invoke` unless
+`--allow-draft` is passed, and is hidden from the agent-facing catalog entirely — a draft an
+agent can see is a draft it will call. What is missing is anything that *earns* the transition
+to `approved`; today it is a human editing a field.
 
 **Discovered handlers.** Discovery records zero. A single happy-path run cannot know how an
 application reports "record not found", and inventing handlers would be fiction — which is

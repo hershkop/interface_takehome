@@ -33,6 +33,7 @@ import type {
 } from "./schema.js";
 import { Action, CapabilityArtifact as ArtifactSchema } from "./schema.js";
 import { EvidenceRecorder, newRunId } from "./evidence.js";
+import { SessionController, type InterventionChannel } from "./handoff.js";
 import { createRedactor } from "./redact.js";
 import { GuardedSurface, PolicyGuard } from "./safety.js";
 import { PlaywrightSurface, describeCondition } from "./surface.js";
@@ -49,6 +50,12 @@ export interface DiscoveryRequest {
   inputs: Record<string, string>;
   secrets: Record<string, string>;
   maxSteps?: number;
+  /**
+   * Where an irreversible action during exploration is routed. With no channel, such an action
+   * is refused outright and the model is told why — an unattended discovery run must not be
+   * able to move money simply because nobody was watching.
+   */
+  interventionChannel?: InterventionChannel;
   headed?: boolean;
   evidenceRoot?: string;
   apiKey: string;
@@ -113,7 +120,12 @@ const FINISH_TOOL: Anthropic.Tool = {
           properties: {
             name: { type: "string" },
             variable: { type: "string", description: "The `as` name of an extract step." },
-            type: { type: "string", enum: ["string", "number", "boolean"] },
+            type: {
+              type: "string",
+              enum: ["string", "number", "boolean"],
+              description:
+                'Must agree with the coercion: "currency", "int" and "number" all yield a number.',
+            },
             coerce: {
               // Described rather than enumerated: a nullable enum is rejected by the API, and
               // an unknown value is caught by the artifact schema before anything replays.
@@ -209,6 +221,14 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
   });
   guard.begin();
 
+  const controller = request.interventionChannel
+    ? new SessionController(request.interventionChannel, {
+        observe: () => surface.observe(0),
+        screenshot: (label) => recorder.screenshot(surface.page, label),
+        record: (type, detail) => recorder.event({ type, detail }),
+      })
+    : undefined;
+
   const recorded: RecordedStep[] = [];
   const messages: Anthropic.MessageParam[] = [];
   let modelCalls = 0;
@@ -303,6 +323,33 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
       if (!built.ok) {
         messages.push({ role: "user", content: [...toolResult(call.id, built.error), ...surplus] });
         continue;
+      }
+
+      // ── Risk gate ────────────────────────────────────────────────────────
+      //
+      // The same gate replay uses, reached by a different route: replay reads the risk off the
+      // artifact, discovery infers it from the control. Without this, the default policy
+      // permits clicks and an exploring model could submit a transfer because the flow had not
+      // been written down yet.
+      const gate = await gateRiskyAction(built, proposal, guard, controller, {
+        runId: recorder.runId,
+        capabilityId: request.capabilityId,
+        goal: request.goal,
+        step,
+      });
+      if (gate) {
+        await recorder.event({
+          type: "discovery.approval",
+          stepIndex: step,
+          detail: { decision: gate.decision, control: gate.control },
+        });
+        if (gate.decision !== "proceed") {
+          messages.push({
+            role: "user",
+            content: [...toolResult(call.id, gate.message), ...surplus],
+          });
+          continue;
+        }
       }
 
       const outcome = await execute(built.action, built.target, guarded, {
@@ -547,6 +594,67 @@ async function execute(
   }
 }
 
+
+/**
+ * Refuses, or escalates, an action aimed at a control the policy calls risky.
+ *
+ * Returns undefined when the action is ordinary. Otherwise the caller either proceeds (a human
+ * said so) or feeds the refusal back to the model, which can then find another route or give up
+ * — both better outcomes than an exploring agent committing a transaction nobody approved.
+ */
+async function gateRiskyAction(
+  built: Extract<BuiltAction, { ok: true }>,
+  proposal: ActInput,
+  guard: PolicyGuard,
+  controller: SessionController | undefined,
+  context: { runId: string; capabilityId: string; goal: string; step: number },
+): Promise<{ decision: string; control: string; message: string } | undefined> {
+  const mutating = ["click", "fill", "select"].includes(built.action.action);
+  if (!mutating) return undefined;
+
+  const descriptors: Array<string | undefined> = [
+    proposal.name ?? undefined,
+    proposal.css ?? undefined,
+    built.target?.description,
+  ];
+  const risk = guard.classifyControl(descriptors);
+  if (!guard.requiresApproval(risk)) return undefined;
+
+  const control = descriptors.find(Boolean) ?? built.action.action;
+
+  if (!controller) {
+    return {
+      decision: "refused",
+      control,
+      message:
+        `Refused: "${control}" is classified as an irreversible control by policy, and this ` +
+        `exploration is running unattended with no operator to approve it. Reach the goal ` +
+        `another way, or call give_up so a human can take over.`,
+    };
+  }
+
+  const outcome = await controller.handOver({
+    runId: context.runId,
+    reason: "approval_required",
+    message: `Discovery wants to act on "${control}", which policy classifies as irreversible.`,
+    capabilityId: context.capabilityId,
+    goal: context.goal,
+    step: { id: `discovery-step-${context.step}`, index: context.step },
+  });
+
+  if (outcome.decision === "proceed") {
+    return { decision: "proceed", control, message: "" };
+  }
+  return {
+    decision: outcome.decision,
+    control,
+    message:
+      outcome.decision === "completed_by_human"
+        ? `A human performed that action themselves. Continue from the current page state.`
+        : `A human declined that action. Reach the goal another way, or call give_up.`,
+  };
+}
+
 // ─── Recording ─────────────────────────────────────────────────────────────────
 
 /**
@@ -572,12 +680,26 @@ function buildArtifact(
     inputs[name] = { type: "string", required: true, sensitive: false };
   }
 
+  // A coercion determines the resulting type, so where the model's declaration disagrees the
+  // coercion wins. This is normalisation rather than papering over a mistake: "currency" will
+  // return a number whatever the artifact claims, and the catalog would otherwise advertise a
+  // type the capability never produces. The schema rejects the mismatch; this stops a run being
+  // thrown away over a redundant field.
+  const YIELDS: Record<string, string> = {
+    trim: "string",
+    currency: "number",
+    int: "number",
+    number: "number",
+  };
+
   const outputs: Record<string, unknown> = {};
   for (const output of finish.outputs) {
+    const coerce = output.coerce ?? undefined;
+    const type = coerce && YIELDS[coerce] ? YIELDS[coerce] : output.type;
     outputs[output.name] = {
-      type: output.type,
+      type,
       source: { kind: "variable", name: output.variable },
-      ...(output.coerce ? { coerce: output.coerce } : {}),
+      ...(coerce ? { coerce } : {}),
       onMissing: "fail",
     };
   }
@@ -622,19 +744,37 @@ function buildArtifact(
  */
 function parameteriseTarget(target: Target, request: DiscoveryRequest): Target {
   const swap = (value: string): string => {
+    let out = value;
     for (const [name, input] of Object.entries(request.inputs)) {
-      if (input && value === input) return `{{inputs.${name}}}`;
+      if (!input) continue;
+      // Substring, not equality: a selector like `a[href*="12678"]` embeds the value rather
+      // than being it, and leaving that literal is exactly the silent-wrong-account case.
+      if (out.includes(input)) out = out.split(input).join(`{{inputs.${name}}}`);
     }
-    return value;
+    return out;
   };
 
   return {
     ...target,
     ...(target.description ? { description: swap(target.description) } : {}),
     candidates: target.candidates.map((candidate) => {
-      if (candidate.strategy === "role") return { ...candidate, name: swap(candidate.name) };
-      if (candidate.strategy === "text") return { ...candidate, value: swap(candidate.value) };
-      return candidate;
+      // Every strategy that carries a string, not just the preferred one.
+      //
+      // A role candidate correctly becoming {{inputs.accountId}} while its CSS fallback stays
+      // wired to "12678" is the worst outcome this system can produce: if the preferred locator
+      // ever stops resolving, replay falls through and silently acts on the wrong account —
+      // successfully. A wrong answer reported as success is worse than a refusal.
+      switch (candidate.strategy) {
+        case "role":
+          return { ...candidate, name: swap(candidate.name) };
+        case "text":
+        case "css":
+        case "label":
+        case "testId":
+          return { ...candidate, value: swap(candidate.value) };
+        case "coordinates":
+          return candidate;
+      }
     }),
   };
 }

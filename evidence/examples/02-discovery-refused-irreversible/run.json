@@ -1,8 +1,8 @@
 {
-  "runId": "discover-20260924T150443-95ivv",
+  "runId": "discover-20260924T150609-2vpzw",
   "phase": "discovery",
-  "goal": "Log in, then look up account 12678 and read its current balance and account type from the account detail screen.",
-  "capabilityId": "lookup_balance_discovered",
+  "goal": "Log in, go to the Transfer Funds page, transfer 25 dollars from account 12345 to account 12678, and reach the confirmation screen.",
+  "capabilityId": "transfer_discovered",
   "model": "claude-opus-5",
   "baseUrl": "http://localhost:18080/parabank",
   "policy": {
@@ -37,5 +37,5 @@
     "runTimeoutMs": 300000,
     "redactPatterns": []
   },
-  "startedAt": "2026-09-24T15:04:43.335Z"
+  "startedAt": "2026-09-24T15:06:09.382Z"
 }

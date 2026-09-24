@@ -29,6 +29,7 @@ interface ParsedArgs {
   capability: string | undefined;
   out: string | undefined;
   maxSteps: number | undefined;
+  allowDraft: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -78,6 +79,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     capability,
     out,
     maxSteps,
+    allowDraft: argv.includes("--allow-draft"),
   };
 }
 
@@ -99,6 +101,7 @@ Options:
   --goal TEXT     What this invocation is for; shown to the operator on escalation.
   --trace         Write a raw Playwright trace. UNREDACTED — see README.
   --json          Print the RunResult as JSON and nothing else.
+  --allow-draft   invoke only: run a capability still marked draft.
 
 discover options:
   --goal TEXT       What to accomplish. Required.
@@ -225,13 +228,7 @@ async function main(): Promise<void> {
 
   // Exit codes distinguish the four statuses, so a caller can branch without parsing output.
   // A business outcome is NOT an error: "no such account" is a legitimate answer.
-  process.exit(
-    result.status === "success" || result.status === "business_outcome"
-      ? 0
-      : result.status === "escalated"
-        ? 2
-        : 1,
-  );
+  process.exit(exitCodeFor(result));
 }
 
 
@@ -250,8 +247,10 @@ async function printCatalog(asJson: boolean): Promise<void> {
   const { entries, invalid } = await loadCatalog(CAPABILITIES_DIR);
 
   if (asJson) {
-    // Exactly what an agent would be handed: a list of callable tools.
-    process.stdout.write(`${JSON.stringify(entries.map(toToolDefinition), null, 2)}\n`);
+    // Exactly what an agent would be handed: approved capabilities only. A draft it can see is
+    // a draft it will call.
+    const { entries: callable } = await loadCatalog(CAPABILITIES_DIR, { agentFacing: true });
+    process.stdout.write(`${JSON.stringify(callable.map(toToolDefinition), null, 2)}\n`);
     return;
   }
 
@@ -285,8 +284,18 @@ async function runInvoke(args: ParsedArgs): Promise<void> {
     ? Policy.parse(JSON.parse(await readFile(args.policyPath, "utf8")))
     : defaultPolicy();
 
+  const lines = args.interactive ? createLineReader() : undefined;
+  const channel = lines
+    ? new CliInterventionChannel({
+        write: (text) => process.stdout.write(text),
+        readLine: () => lines.next(),
+      })
+    : undefined;
+
   const result = await invoke(CAPABILITIES_DIR, capabilityId, args.inputs, {
     policy,
+    allowDraft: args.allowDraft,
+    ...(channel ? { interventionChannel: channel } : {}),
     secrets: {
       parabankUsername: config.parabank.username,
       parabankPassword: config.parabank.password,
@@ -297,16 +306,30 @@ async function runInvoke(args: ParsedArgs): Promise<void> {
     reauthenticate: loginToParabank,
   });
 
+  lines?.close();
+
   if ("notFound" in result) {
     process.stderr.write(
       `no capability "${capabilityId}". Available: ${result.notFound.join(", ") || "(none)"}\n`,
     );
     process.exit(1);
   }
+  if ("refused" in result) {
+    process.stderr.write(`${result.refused}\n`);
+    process.exit(1);
+  }
 
   if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   else printResult(result);
-  process.exit(result.status === "success" || result.status === "business_outcome" ? 0 : 1);
+  // The same four-state contract `replay` exposes. Collapsing escalated into failure would stop
+  // an agent distinguishing "a human is now involved" from "this did not work".
+  process.exit(exitCodeFor(result));
+}
+
+/** 0 = success or business outcome, 2 = escalated, 1 = failure. */
+function exitCodeFor(result: RunResult): number {
+  if (result.status === "success" || result.status === "business_outcome") return 0;
+  return result.status === "escalated" ? 2 : 1;
 }
 
 async function runDiscovery(args: ParsedArgs): Promise<void> {

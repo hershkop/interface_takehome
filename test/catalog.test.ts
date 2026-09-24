@@ -126,3 +126,51 @@ describe("toToolDefinition", () => {
     expect(tool.description).toContain("DRAFT");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regressions from PR6 review.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("drafts are not silently callable (review #2)", () => {
+  it("hides drafts from the agent-facing catalog", async () => {
+    // A warning in a description is documentation. An agent reads the schema and calls the
+    // tool — so a draft it can see is a draft it will call.
+    const { entries } = await loadCatalog(dir, { agentFacing: true });
+    expect(entries.map((e) => e.capabilityId)).toEqual(["lookup_account_balance"]);
+  });
+
+  it("still shows drafts to a human browsing the catalog", async () => {
+    // What a person reviewing capabilities should see and what an agent should be handed as
+    // callable tools are not the same list.
+    const { entries } = await loadCatalog(dir);
+    expect(entries.map((e) => e.capabilityId).sort()).toEqual([
+      "lookup_account_balance",
+      "transfer_funds",
+    ]);
+  });
+
+  it("refuses to invoke a draft without an explicit opt-in", async () => {
+    const { invoke } = await import("../src/catalog.js");
+    const { Policy } = await import("../src/schema.js");
+    const result = await invoke(
+      dir,
+      "transfer_funds",
+      {},
+      { policy: Policy.parse({ allowedOrigins: ["http://localhost:18080"] }) },
+    );
+    expect(result).toHaveProperty("refused");
+    if ("refused" in result) expect(result.refused).toContain("draft");
+  });
+
+  it("reports an unknown capability distinctly from a refused one", async () => {
+    const { invoke } = await import("../src/catalog.js");
+    const { Policy } = await import("../src/schema.js");
+    const result = await invoke(
+      dir,
+      "no_such_capability",
+      {},
+      { policy: Policy.parse({ allowedOrigins: ["http://localhost:18080"] }) },
+    );
+    expect(result).toHaveProperty("notFound");
+  });
+});

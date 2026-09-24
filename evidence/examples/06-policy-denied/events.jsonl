@@ -1,0 +1,5 @@
+{"timestamp":"2026-09-24T15:09:44.846Z","runId":"replay-20260924T150944-galbr","phase":"replay","type":"step.start","stepId":"open_login","stepIndex":0,"actionType":"navigate","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:44.961Z","runId":"replay-20260924T150944-galbr","phase":"replay","type":"step.ok","stepId":"open_login","stepIndex":0,"actionType":"navigate","durationMs":114}
+{"timestamp":"2026-09-24T15:09:44.961Z","runId":"replay-20260924T150944-galbr","phase":"replay","type":"step.start","stepId":"enter_username","stepIndex":1,"actionType":"fill","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:44.962Z","runId":"replay-20260924T150944-galbr","phase":"replay","type":"policy.denied","detail":{"reason":"action type \"fill\" is blocked by policy"}}
+{"timestamp":"2026-09-24T15:09:44.964Z","runId":"replay-20260924T150944-galbr","phase":"replay","type":"policy.denied","stepId":"enter_username","stepIndex":1,"actionType":"fill","detail":{"reason":"action type \"fill\" is blocked by policy"}}

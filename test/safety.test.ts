@@ -144,3 +144,39 @@ describe("requireApprovalFor is policy's decision, not the engine's", () => {
     expect(g.requiresApproval("approval_required")).toBe(false);
   });
 });
+
+describe("classifyControl gates discovery's irreversible actions (review #1)", () => {
+  const risky = () =>
+    guard({ riskyControls: ["^transfer$", "^submit", "confirm", "^delete"] });
+
+  it("flags a control whose name names an irreversible operation", () => {
+    // Replay learns risk from the artifact. Discovery is producing the artifact, so without
+    // this it has no way to know the button it is about to click moves money.
+    expect(risky().classifyControl(["Transfer"])).toBe("approval_required");
+    expect(risky().classifyControl(["Submit Payment"])).toBe("approval_required");
+    expect(risky().classifyControl([undefined, "#confirm-btn"])).toBe("approval_required");
+  });
+
+  it("is case-insensitive, because accessible names are written by humans", () => {
+    expect(risky().classifyControl(["TRANSFER"])).toBe("approval_required");
+    expect(risky().classifyControl(["transfer"])).toBe("approval_required");
+  });
+
+  it("leaves ordinary controls alone", () => {
+    for (const name of ["Accounts Overview", "Log In", "Username", "Find Transactions"]) {
+      expect(risky().classifyControl([name]), name).toBe("safe");
+    }
+  });
+
+  it("classifies nothing when a tenant declares no risky controls", () => {
+    expect(guard().classifyControl(["Transfer"])).toBe("safe");
+  });
+
+  it("rejects a policy whose riskyControls pattern does not compile", () => {
+    const parsed = Policy.safeParse({
+      allowedOrigins: ["http://a.test"],
+      riskyControls: ["([unclosed"],
+    });
+    expect(parsed.success).toBe(false);
+  });
+});

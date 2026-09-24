@@ -5,9 +5,9 @@
     "accountType": "CHECKING"
   },
   "evidence": {
-    "runId": "replay-20260924T142317-2bobs",
-    "directory": "evidence/replay-20260924T142317-2bobs",
-    "eventLog": "evidence/replay-20260924T142317-2bobs/events.jsonl",
+    "runId": "replay-20260924T150938-5nuwd",
+    "directory": "evidence/replay-20260924T150938-5nuwd",
+    "eventLog": "evidence/replay-20260924T150938-5nuwd/events.jsonl",
     "traceUnredacted": false,
     "screenshots": [],
     "modelCalls": 0
