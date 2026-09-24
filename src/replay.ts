@@ -33,6 +33,12 @@ import {
 } from "./schema.js";
 import { EvidenceRecorder, newRunId } from "./evidence.js";
 import { GuardedSurface, PolicyGuard } from "./safety.js";
+import {
+  OwnedSurface,
+  SessionController,
+  type HumanEvent,
+  type InterventionChannel,
+} from "./handoff.js";
 import { createRedactor, type Redactor } from "./redact.js";
 import { PlaywrightSurface, describeCondition, type Surface } from "./surface.js";
 import {
@@ -64,10 +70,13 @@ export interface ReplayOptions {
    */
   policy: Policy;
   /**
-   * Supplied by the handoff layer in PR5. Until then, a step that needs approval returns
-   * `escalated` rather than pretending it could proceed.
+   * Where an intervention is routed. With no channel, a step needing a human returns
+   * `escalated` rather than pretending it could proceed — which is the correct behaviour for an
+   * unattended caller, not a limitation.
    */
-  requestApproval?: (context: { stepId: string; stepIndex: number }) => Promise<boolean>;
+  interventionChannel?: InterventionChannel;
+  /** Carried into the intervention request so an operator knows what was being attempted. */
+  goal?: string;
   /**
    * How to re-authenticate when a handler's remedy calls for it. Login is itself a UI flow and
    * differs per application, so the engine does not invent one — an artifact that declares the
@@ -103,6 +112,9 @@ interface RunContext {
   /** How long a postcondition is polled before it is treated as unmet. */
   postconditionTimeoutMs: number;
   guard: PolicyGuard;
+  controller: SessionController | undefined;
+  capabilityId: string;
+  goal: string | undefined;
 }
 
 type StepDisposition =
@@ -201,6 +213,8 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
   let surface: PlaywrightSurface | undefined;
   let terminal: TerminalOutcome | undefined;
   let outputs: Record<string, unknown> | undefined;
+  let controller: SessionController | undefined;
+  const humanEvents: HumanEvent[] = [];
 
   try {
     // Launching is inside the guarded lifecycle. A missing browser binary or a failed context
@@ -213,14 +227,38 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       defaultTimeoutMs: options.stepTimeoutMs ?? 10_000,
       ...(options.executablePath ? { executablePath: options.executablePath } : {}),
       navigationAllowed: guard.navigationAllowed,
+      onHumanEvent: (raw) => {
+        // Recorded only while a human actually holds the session; automation's own clicks fire
+        // the same listeners and are not "human events".
+        if (controller?.owner !== "human") return;
+        const event: HumanEvent = { at: new Date().toISOString(), ...raw };
+        humanEvents.push(event);
+        controller.noteHumanEvent(event);
+        void recorder.event({ type: "human.action", detail: { ...event } });
+      },
     });
+
+    if (options.interventionChannel) {
+      const live = surface;
+      controller = new SessionController(options.interventionChannel, {
+        observe: () => live.observe(0),
+        screenshot: (label) => recorder.screenshot(live.page, label),
+        record: (type, detail) => recorder.event({ type, detail }),
+      });
+    }
 
     const guardedSurface = new GuardedSurface(surface, guard, (reason) => {
       void recorder.event({ type: "policy.denied", detail: { reason } });
     });
 
+    // Ownership is checked OUTSIDE policy: if a person is driving, no question about what
+    // policy would have permitted is even asked.
+    const activeSurface = controller
+      ? new OwnedSurface(guardedSurface, controller)
+      : guardedSurface;
+
     const context: RunContext = {
-      surface: guardedSurface,
+      surface: activeSurface,
       rawSurface: surface,
       recorder,
       redact,
@@ -234,6 +272,9 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       // not to restate the risk — which is the documented inheritance rule doing nothing.
       capabilityRisk: artifact.metadata.risk,
       guard,
+      controller,
+      capabilityId: artifact.capabilityId,
+      goal: options.goal,
     };
 
     guard.begin();
@@ -312,6 +353,10 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
   // Every terminal result is assembled AFTER the surface is closed, so the evidence summary can
   // see the trace that closing produced. Building the success result inside the try meant a
   // successful --trace run reported traceUnredacted: false next to a trace.zip that existed.
+  if (humanEvents.length > 0) {
+    await recorder.writeHumanActions(humanEvents);
+  }
+
   const result: RunResult =
     outputs !== undefined
       ? { status: "success", outputs, evidence: recorder.summary() }
@@ -404,6 +449,13 @@ async function runSteps(
       if (before.kind === "retry") continue;
 
       const approval = await checkApproval(step, index, context);
+      if (approval?.kind === "skip") {
+        // The human already performed this step in the live session. Verify where we ended up
+        // rather than trusting it, then move on.
+        const postcondition = await verifyPostcondition(step, index, context);
+        if (postcondition) return postcondition;
+        break;
+      }
       if (approval) return approval;
 
       // Budget checks are per attempt, not per step: a retrying step consumes budget, which is
@@ -873,11 +925,13 @@ async function readOutcomeDetail(
 
 // ─── Approval seam (wired to a human in PR5) ───────────────────────────────────
 
+type ApprovalOutcome = TerminalOutcome | { kind: "skip" };
+
 async function checkApproval(
   step: ArtifactStep,
   index: number,
   context: RunContext,
-): Promise<TerminalOutcome | undefined> {
+): Promise<ApprovalOutcome | undefined> {
   // Documented rule: a step without its own classification inherits the capability's.
   const risk = step.risk ?? context.capabilityRisk;
 
@@ -905,24 +959,53 @@ async function checkApproval(
   });
 
   // Without an operator channel there is no honest way to proceed: the run is not finished,
-  // has not failed, and has not produced an outcome. That is what `escalated` is for.
-  if (!context.options.requestApproval) {
+  // has not failed, and has not produced an outcome. That is what `escalated` is for, and it is
+  // the correct answer for an unattended caller rather than a limitation.
+  if (!context.controller) {
     await captureFailureContext(context, `approval-${step.id}`);
     return { kind: "escalated", stepId: step.id, stepIndex: index };
   }
 
-  const approved = await context.options.requestApproval({ stepId: step.id, stepIndex: index });
-  if (approved) return undefined;
-  return {
-    kind: "failure",
-    error: {
-      code: "HUMAN_ABORTED",
-      message: `operator declined step "${step.id}"`,
-      step: { id: step.id, index },
-      recoverable: false,
-      attempts: 1,
-    },
-  };
+  const outcome = await context.controller.handOver({
+    runId: context.recorder.runId,
+    reason: "approval_required",
+    message: `Step "${step.id}" is classified ${risk} and needs a person.`,
+    capabilityId: context.capabilityId,
+    ...(context.goal === undefined ? {} : { goal: context.goal }),
+    step: { id: step.id, index },
+  });
+
+  switch (outcome.decision) {
+    case "proceed":
+      // The operator authorised it; automation performs the step.
+      return undefined;
+
+    case "completed_by_human":
+      // The operator did it themselves. Performing it again would repeat whatever they just
+      // did — on a transfer, a second transfer. This is why the decision is three-valued
+      // rather than a boolean approve/deny.
+      await context.recorder.event({
+        type: "step.completed_by_human",
+        stepId: step.id,
+        stepIndex: index,
+        ...(outcome.note === undefined ? {} : { detail: { note: outcome.note } }),
+      });
+      return { kind: "skip" };
+
+    case "abort":
+      return {
+        kind: "failure",
+        error: {
+          code: "HUMAN_ABORTED",
+          message: `operator stopped the run at step "${step.id}"${
+            outcome.reason ? `: ${outcome.reason}` : ""
+          }`,
+          step: { id: step.id, index },
+          recoverable: false,
+          attempts: 1,
+        },
+      };
+  }
 }
 
 // ─── Outputs ───────────────────────────────────────────────────────────────────

@@ -144,3 +144,54 @@ describe("describeCondition", () => {
     ).toBe('title containing "Overview" AND NOT (text "Error")');
   });
 });
+
+describe("human event capture (PR5)", () => {
+  it("keeps recording after a navigation, and never records typed values", async () => {
+    // Two properties, both easy to get wrong.
+    //
+    // Listeners attached with a one-off evaluate() die on the next navigation, so a person who
+    // clicks anything that loads a page is recorded for the first click and then silently not
+    // at all — the worst kind of failure in an audit trail, because it looks like they did
+    // nothing. addInitScript re-runs per document.
+    //
+    // And what someone types into a bank's back office must not be persisted. The payload
+    // carries a length, never the characters.
+    const { PlaywrightSurface } = await import("../src/surface.js");
+    const events: Array<Record<string, unknown>> = [];
+
+    const surface = await PlaywrightSurface.launch({
+      onHumanEvent: (e) => events.push({ ...e }),
+    });
+
+    try {
+      const page = surface.page;
+      const html = (label: string) =>
+        `data:text/html,<body><button id="b">${label}</button>` +
+        `<input id="pw" type="password"></body>`;
+
+      await page.goto(html("first"));
+      await page.click("#b");
+      await page.fill("#pw", "sup3r-s3cret-value");
+      await page.dispatchEvent("#pw", "change");
+
+      // Navigate: a one-off listener injection would stop reporting here.
+      await page.goto(html("second"));
+      await page.click("#b");
+
+      await page.waitForTimeout(150);
+
+      const clicks = events.filter((e) => e.type === "click");
+      expect(clicks.length).toBeGreaterThanOrEqual(2);
+
+      const serialised = JSON.stringify(events);
+      expect(serialised).not.toContain("sup3r-s3cret-value");
+
+      const changes = events.filter((e) => e.type === "change");
+      expect(changes.length).toBeGreaterThan(0);
+      expect(changes[0]?.valueLength).toBe("sup3r-s3cret-value".length);
+      expect(changes[0]?.id).toBe("pw");
+    } finally {
+      await surface.close();
+    }
+  }, 60_000);
+});

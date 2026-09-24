@@ -205,6 +205,22 @@ export interface PlaywrightSurfaceOptions {
    * URL, the browser would already have fetched it.
    */
   navigationAllowed?: (url: string) => boolean;
+  /**
+   * Called for every user interaction in the page, so a human's actions during a handoff can be
+   * recorded. Values are never included — see the payload assembled in `installHumanEventCapture`.
+   */
+  onHumanEvent?: (event: RawHumanEvent) => void;
+}
+
+/** Shape emitted by the in-page listeners. Deliberately free of typed content. */
+export interface RawHumanEvent {
+  type: "click" | "input" | "change" | "submit";
+  url: string;
+  tag?: string;
+  role?: string;
+  name?: string;
+  id?: string;
+  valueLength?: number;
 }
 
 export class PlaywrightSurface implements Surface {
@@ -229,6 +245,10 @@ export class PlaywrightSurface implements Surface {
       ...(options.executablePath ? { executablePath: options.executablePath } : {}),
     });
     const context = await browser.newContext();
+    if (options.onHumanEvent) {
+      await installHumanEventCapture(context, options.onHumanEvent);
+    }
+
     const blockedNavigations: string[] = [];
     if (options.navigationAllowed) {
       const allowed = options.navigationAllowed;
@@ -435,6 +455,64 @@ export class PlaywrightSurface implements Surface {
     await this.browser.close().catch(() => {});
     return tracePath;
   }
+}
+
+
+/**
+ * Installs in-page listeners that report user interactions.
+ *
+ * Two details decide whether this works at all.
+ *
+ * `addInitScript` rather than a one-off `evaluate`: listeners attached to a live document die
+ * on the next navigation. A human who clicks anything that loads a page would be recorded for
+ * the first click and then silently not at all — the worst kind of failure in an audit trail,
+ * because it looks like the person did nothing.
+ *
+ * The payload carries a value's LENGTH and never its content. What someone types into a bank's
+ * back office is precisely the data that must not be persisted, and a field's identity plus the
+ * fact that it was filled is what an auditor actually needs.
+ */
+async function installHumanEventCapture(
+  context: BrowserContext,
+  sink: (event: RawHumanEvent) => void,
+): Promise<void> {
+  const BINDING = "__recordHumanEvent__";
+
+  await context.exposeBinding(BINDING, (_source, payload) => {
+    sink(payload as RawHumanEvent);
+  });
+
+  await context.addInitScript(
+    ({ binding }) => {
+      const report = (type: string, target: EventTarget | null): void => {
+        const el = target as HTMLElement | null;
+        if (!el || typeof el.tagName !== "string") return;
+        const input = el as HTMLInputElement;
+        const isValued = typeof input.value === "string";
+        const fn = (window as unknown as Record<string, unknown>)[binding];
+        if (typeof fn !== "function") return;
+        (fn as (p: unknown) => void)({
+          type,
+          url: location.href,
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute("role") ?? undefined,
+          name:
+            el.getAttribute("aria-label") ??
+            el.getAttribute("name") ??
+            (el.textContent ?? "").trim().slice(0, 60) ??
+            undefined,
+          id: el.id || undefined,
+          // Length only. Never the characters.
+          valueLength: isValued ? input.value.length : undefined,
+        });
+      };
+
+      document.addEventListener("click", (e) => report("click", e.target), true);
+      document.addEventListener("change", (e) => report("change", e.target), true);
+      document.addEventListener("submit", (e) => report("submit", e.target), true);
+    },
+    { binding: BINDING },
+  );
 }
 
 function message(err: unknown): string {

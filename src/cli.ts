@@ -9,6 +9,8 @@ import { config, defaultPolicy } from "./config.js";
 import { CapabilityArtifact, Policy, type RunResult } from "./schema.js";
 import { replay } from "./replay.js";
 import { loginToParabank } from "./parabank.js";
+import { CliInterventionChannel } from "./handoff.js";
+import { createInterface } from "node:readline";
 
 interface ParsedArgs {
   command: string | undefined;
@@ -17,6 +19,8 @@ interface ParsedArgs {
   headed: boolean;
   trace: boolean;
   json: boolean;
+  interactive: boolean;
+  goal: string | undefined;
   baseUrl: string | undefined;
   policyPath: string | undefined;
 }
@@ -26,6 +30,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let artifactPath: string | undefined;
   let baseUrl: string | undefined;
   let policyPath: string | undefined;
+  let goal: string | undefined;
 
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -37,6 +42,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       baseUrl = argv[++i];
     } else if (arg === "--policy") {
       policyPath = argv[++i];
+    } else if (arg === "--goal") {
+      goal = argv[++i];
     } else if (!arg.startsWith("-") && artifactPath === undefined) {
       artifactPath = arg;
     }
@@ -49,6 +56,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     headed: argv.includes("--headed"),
     trace: argv.includes("--trace"),
     json: argv.includes("--json"),
+    interactive: argv.includes("--interactive"),
+    goal,
     baseUrl,
     policyPath,
   };
@@ -63,7 +72,10 @@ Options:
   --input k=v     Invocation input. Repeatable.
   --base-url URL  Override the artifact's recorded baseUrl (the per-tenant resolution point).
   --policy FILE   Policy JSON. Defaults to the ParaBank policy in src/config.ts.
-  --headed        Show the browser.
+  --headed        Show the browser. Required for a human to take over the session.
+  --interactive   Route interventions to this terminal. A step needing a human then hands
+                  you the live browser instead of returning an escalated result.
+  --goal TEXT     What this invocation is for; shown to the operator on escalation.
   --trace         Write a raw Playwright trace. UNREDACTED — see README.
   --json          Print the RunResult as JSON and nothing else.
 `;
@@ -119,9 +131,29 @@ async function main(): Promise<void> {
     }
   }
 
+  // With no channel, a step needing a human returns `escalated` — the honest result for an
+  // unattended caller. --interactive routes it to this terminal instead.
+  const lines = args.interactive ? createLineReader() : undefined;
+
+  const channel = lines
+    ? new CliInterventionChannel({
+        write: (text) => process.stdout.write(text),
+        readLine: () => lines.next(),
+      })
+    : undefined;
+
+  if (args.interactive && !args.headed) {
+    process.stdout.write(
+      "\n  note: --interactive without --headed means you cannot see the session you are\n" +
+        "        being asked to take over. Add --headed.\n",
+    );
+  }
+
   const result = await replay({
     artifact: raw,
     policy,
+    ...(channel ? { interventionChannel: channel } : {}),
+    ...(args.goal ? { goal: args.goal } : {}),
     inputs: args.inputs,
     secrets: {
       parabankUsername: config.parabank.username,
@@ -134,6 +166,8 @@ async function main(): Promise<void> {
     // The ParaBank routine is supplied here, at the edge that knows which app this is.
     reauthenticate: loginToParabank,
   });
+
+  lines?.close();
 
   if (args.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -150,6 +184,44 @@ async function main(): Promise<void> {
         ? 2
         : 1,
   );
+}
+
+
+/**
+ * Buffers stdin from process start rather than reading on demand.
+ *
+ * An intervention is requested tens of seconds into a run, by which time piped input has long
+ * since reached EOF — asking then gets "readline was closed" rather than the answer that was
+ * provided. Buffering from the start makes a scripted operator behave the same as a person at a
+ * terminal, which is what makes the handoff testable end to end.
+ */
+function createLineReader(): { next: () => Promise<string>; close: () => void } {
+  const buffered: string[] = [];
+  const waiting: Array<(line: string) => void> = [];
+  let closed = false;
+
+  const rl = createInterface({ input: process.stdin });
+  rl.on("line", (line) => {
+    const waiter = waiting.shift();
+    if (waiter) waiter(line);
+    else buffered.push(line);
+  });
+  rl.on("close", () => {
+    closed = true;
+    // Anything still waiting gets an empty answer, which the channel reads as "abort".
+    while (waiting.length > 0) waiting.shift()?.("");
+  });
+
+  return {
+    next: () =>
+      new Promise<string>((resolve) => {
+        const ready = buffered.shift();
+        if (ready !== undefined) resolve(ready);
+        else if (closed) resolve("");
+        else waiting.push(resolve);
+      }),
+    close: () => rl.close(),
+  };
 }
 
 function printResult(result: RunResult): void {
@@ -180,6 +252,7 @@ function printResult(result: RunResult): void {
   }
   line("");
   line(`  model calls : ${result.evidence.modelCalls}`);
+  if (result.evidence.humanActions) line(`  human acts  : ${result.evidence.humanActions}`);
   if (result.evidence.directory) line(`  evidence    : ${result.evidence.directory}`);
   line("");
 }
