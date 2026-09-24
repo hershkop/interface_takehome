@@ -53,8 +53,13 @@ account — contains this in its markup:
 Error! An internal error has occurred and has been logged.
 ```
 
-It lives in a hidden `#showError` div that JS reveals only on failure. A handler matching raw
-DOM text for `"An internal error has occurred"` would fire on **every successful run**.
+It lives in a `display: none` div that JS reveals only on failure. A handler matching raw DOM
+text for `"An internal error has occurred"` would fire on **every successful run**.
+
+*Corrected during PR2:* the element is `#error` on `activity.htm`; `#showError` is the
+equivalent on `transfer.htm`. Both are pre-rendered hidden and revealed by script, so the
+conclusion holds — only the selector in the original note was wrong. Confirmed in a real
+browser: the text is present and `visible=0` both at `domcontentloaded` and at `networkidle`.
 
 Consequences, both already latent in the plan and now non-negotiable:
 

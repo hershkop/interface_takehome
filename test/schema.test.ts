@@ -119,7 +119,14 @@ describe("Condition", () => {
     // ParaBank hides "An internal error has occurred" inside healthy pages, so a handler that
     // matched hidden DOM text would fire on every successful run. See docs/DAY0-FINDINGS.md §3.
     expect(Condition.parse({ kind: "text", value: "x" })).toMatchObject({ visible: true });
-    expect(Condition.parse({ kind: "role", role: "alert" })).toMatchObject({ visible: true });
+  });
+
+  it("gives role conditions no visibility flag, because it could never work", () => {
+    // Role matching resolves against the accessibility tree, which excludes hidden elements
+    // outright. A `visible` flag here would be a field that silently never did anything, so it
+    // is not in the schema at all. Verified against a real browser in test/surface.test.ts.
+    const parsed = Condition.parse({ kind: "role", role: "alert" });
+    expect(parsed).not.toHaveProperty("visible");
   });
 
   it("allows opting into hidden matching explicitly", () => {

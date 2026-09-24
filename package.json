@@ -4,15 +4,20 @@
   "private": true,
   "type": "module",
   "description": "Record an LLM-driven UI run as a typed capability artifact; replay it deterministically.",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "setup": "tsx scripts/setup.ts",
     "cli": "tsx src/cli.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "probe": "tsx scripts/probe.ts",
+    "install:browsers": "playwright install chromium"
   },
   "dependencies": {
     "dotenv": "^17.2.3",
+    "playwright": "^1.63.0",
     "zod": "^4.1.13"
   },
   "devDependencies": {

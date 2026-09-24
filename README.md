@@ -9,8 +9,8 @@ Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking de
 stand-in for the back-office systems this is really aimed at. Design rationale is in
 [PLAN.md](PLAN.md); the assignment write-up will be in `REPORT.md`.
 
-> **Status — PR 1 of 6.** Scaffolding, target verification, and the typed contracts. The surface,
-> replay engine, safety layer, handoff, and LLM discovery land in later PRs.
+> **Status — PR 2 of 6.** Contracts, the surface abstraction, locator resolution, and evidence.
+> The replay engine, safety layer, handoff, and LLM discovery land in later PRs.
 
 ## Setup
 
@@ -18,10 +18,16 @@ Requires Node 20+ and Docker.
 
 ```bash
 npm install
+npm run install:browsers    # downloads Chromium — npm install does NOT do this
 cp .env.example .env        # optional; the defaults work as-is
 docker compose up -d        # starts ParaBank
 npm run setup               # seeds it and prints the demo account IDs
 ```
+
+`npm run install:browsers` is not optional and `npm install` will not do it for you: the
+Playwright *package* installs from npm, but the browser binary is a separate download. Without
+it, `npm test` and `npm run probe` both fail. On Linux or CI, use
+`npx playwright install --with-deps chromium` to pull the system libraries too.
 
 `npm run setup` resets ParaBank to fixed fixture state via
 `POST /services/bank/initializeDB` and verifies the accounts the demo capabilities use. It
@@ -60,21 +66,78 @@ docker compose up -d --force-recreate
 
 ```bash
 npm run setup       # reset + verify the target
-npm test            # unit tests
+npm run probe       # drive the real app through the surface; writes evidence/
+npm run probe -- --headed   # ...and watch it
+npm test            # unit + browser tests
 npm run typecheck   # tsc --noEmit
 ```
 
-The `discover` / `replay` / `capabilities` CLI arrives with the engine in PRs 2–6.
+`npm run probe` is a development harness, not the product CLI — `discover` and `replay` arrive
+with the engine. It exists so this layer can be exercised against the real application rather
+than only against synthetic pages, and so you can look at a real evidence directory:
+
+```
+evidence/probe-<timestamp>/
+├── run.json                 run metadata
+├── events.jsonl             redacted structured events
+├── result.json              the four-status RunResult
+├── 001-overview.png         screenshots, sequence-numbered, sensitive regions masked
+└── failure-snapshot.json    redacted ARIA capture — the rich failure signal
+```
+
+### Evidence has three sinks, and only one of them is a string
+
+Redaction happens at the sink, but not every sink is text, so each is handled differently.
+
+| Sink | Treatment |
+|---|---|
+| **Events, results, failure snapshots** | JSON, passed through the redactor before writing |
+| **Screenshots** | Masked *at capture time* — a rendered pixel cannot be redacted afterwards. Password inputs and anything marked `data-sensitive` are painted over by Playwright before the PNG exists |
+| **Playwright traces** | **Off by default.** Opt in with `npm run probe -- --trace` |
+
+A trace archives request bodies, response bodies, cookies, and serialised DOM snapshots. On
+this target that provably includes `username=john&password=demo`, the `JSESSIONID` cookie,
+customer names, and balances — and the redactor cannot reach inside a zip. So rather than ship
+a sink that quietly defeats the redaction everything else relies on, tracing is opt-in, warns
+when enabled, and sets `traceUnredacted: true` in the run record.
+
+The default rich failure signal is `failure-snapshot.json` instead: a redacted ARIA capture,
+which is text (so it redacts), and is the same view the agent reasons over (so it is more
+useful for debugging a locator failure than a screenshot anyway).
+
+`test/evidence-secrets.test.ts` scans *every* byte of *every* file a run produces for
+configured secrets, because the first version of this claim was made by grepping the JSON and
+missing the archive.
+
+The `discover` / `replay` / `capabilities` CLI arrives in PRs 3–6.
 
 ## What's here now
 
 ```
-src/schema.ts   every typed contract: conditions, locators, actions, the capability
-                artifact, handlers, policy, observations, interventions, run results
-src/config.ts   env + default policy
-scripts/setup.ts  target reset and verification
+src/schema.ts    every typed contract: conditions, locators, actions, the capability
+                 artifact, handlers, policy, observations, interventions, run results
+src/surface.ts   the Surface port + PlaywrightSurface + condition evaluation
+src/locator.ts   candidate list -> exactly one visible element, or a refusal
+src/evidence.ts  JSONL events, screenshots, trace, result.json, model-call counter
+src/redact.ts    one redactor, applied at the sink
+src/config.ts    env + default policy
+scripts/setup.ts target reset and verification
+scripts/probe.ts development harness for the surface layer
 docs/DAY0-FINDINGS.md   what probing ParaBank actually turned up, and what it changed
 ```
+
+### The surface seam
+
+Nothing above `src/surface.ts` mentions Playwright, CSS, or a browser. Artifacts and replay
+speak in intent — *click the control whose accessible name is "Transfer"*, *is this text
+visible* — and `Surface` has seven methods. A desktop adapter would implement the same seven
+against OS accessibility APIs, and no artifact would change.
+
+That is also why observation is a Playwright **ARIA snapshot** rather than a DOM dump: role and
+accessible name is the one representation a modern web app, a legacy frameset, and a native
+desktop app can all produce. It is visibility-aware by construction, far smaller than the DOM,
+and it names controls the same way the recorded locators do — so a model reading it naturally
+proposes role+name targeting instead of brittle CSS.
 
 ### Three schema decisions worth knowing up front
 
