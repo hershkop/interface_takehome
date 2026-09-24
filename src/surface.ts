@@ -214,7 +214,7 @@ export interface PlaywrightSurfaceOptions {
 
 /** Shape emitted by the in-page listeners. Deliberately free of typed content. */
 export interface RawHumanEvent {
-  type: "click" | "input" | "change" | "submit";
+  type: "click" | "input" | "change" | "submit" | "navigate";
   url: string;
   tag?: string;
   role?: string;
@@ -247,6 +247,21 @@ export class PlaywrightSurface implements Surface {
     const context = await browser.newContext();
     if (options.onHumanEvent) {
       await installHumanEventCapture(context, options.onHumanEvent);
+    }
+
+    // Navigation is reported from here rather than in-page: a document being torn down cannot
+    // reliably announce its own departure, and an operator who navigates away mid-handoff is a
+    // material part of the audit trail. Automation's own navigations fire this too and are
+    // filtered out by the ownership check in the sink.
+    const reportNavigation = options.onHumanEvent;
+    if (reportNavigation) {
+      context.on("page", (opened) => {
+        opened.on("framenavigated", (frame) => {
+          if (frame.parentFrame() === null) {
+            reportNavigation({ type: "navigate", url: frame.url() });
+          }
+        });
+      });
     }
 
     const blockedNavigations: string[] = [];
@@ -484,30 +499,65 @@ async function installHumanEventCapture(
 
   await context.addInitScript(
     ({ binding }) => {
+      /** Last time each element reported an edit, so typing does not emit per keystroke. */
+      const lastInput = new WeakMap<Element, number>();
+      const INPUT_COALESCE_MS = 400;
+
       const report = (type: string, target: EventTarget | null): void => {
         const el = target as HTMLElement | null;
         if (!el || typeof el.tagName !== "string") return;
-        const input = el as HTMLInputElement;
-        const isValued = typeof input.value === "string";
+
         const fn = (window as unknown as Record<string, unknown>)[binding];
         if (typeof fn !== "function") return;
+
+        const tag = el.tagName.toLowerCase();
+        const input = el as HTMLInputElement;
+        const hasValue = typeof input.value === "string";
+
+        // An element the user can type into must never contribute its content to the record.
+        // For a <button>Transfer</button>, textContent is the label and is exactly what an
+        // auditor wants. For a contenteditable div it IS what the person typed — and the
+        // redactor cannot recognise arbitrary typed text, so it would be persisted verbatim
+        // into both the event log and the human-actions file.
+        const editable =
+          el.isContentEditable || tag === "input" || tag === "textarea" || tag === "select";
+
+        // Length only, never the characters. contenteditable has no .value, so its length
+        // comes from its text — the length is safe, the text is not.
+        const valueLength = hasValue
+          ? input.value.length
+          : el.isContentEditable
+            ? (el.textContent ?? "").length
+            : undefined;
+
+        if (type === "input") {
+          const now = Date.now();
+          const previous = lastInput.get(el) ?? 0;
+          if (now - previous < INPUT_COALESCE_MS) return;
+          lastInput.set(el, now);
+        }
+
         (fn as (p: unknown) => void)({
           type,
           url: location.href,
-          tag: el.tagName.toLowerCase(),
+          tag,
           role: el.getAttribute("role") ?? undefined,
+          // Stable identifiers first. A label is only read off the element when nobody can
+          // type into it.
           name:
             el.getAttribute("aria-label") ??
             el.getAttribute("name") ??
-            (el.textContent ?? "").trim().slice(0, 60) ??
-            undefined,
+            (editable ? undefined : (el.textContent ?? "").trim().slice(0, 60) || undefined),
           id: el.id || undefined,
-          // Length only. Never the characters.
-          valueLength: isValued ? input.value.length : undefined,
+          valueLength,
         });
       };
 
       document.addEventListener("click", (e) => report("click", e.target), true);
+      // `input` as well as `change`: an edit that never blurs — because the operator submits, or
+      // the page navigates — fires no change event and would vanish from the audit trail
+      // entirely. Coalesced above so typing does not emit one event per keystroke.
+      document.addEventListener("input", (e) => report("input", e.target), true);
       document.addEventListener("change", (e) => report("change", e.target), true);
       document.addEventListener("submit", (e) => report("submit", e.target), true);
     },

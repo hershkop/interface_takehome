@@ -147,28 +147,31 @@ export class SessionController {
       url: observation.url,
     });
 
-    let decision: InterventionDecision;
     try {
-      decision = await this.channel.request(request);
+      const decision = await this.channel.request(request);
+
+      // Re-observe BEFORE handing ownership back. Two reasons, and both are why this capture
+      // sits inside the ownership window rather than after it: a person who is finishing up is
+      // still clicking, and events outside the window are dropped by the ownership filter; and
+      // automation must not be eligible to act until the engine has seen where the page ended
+      // up. Whatever the person did, it is not where automation left it.
+      const after = await this.hooks.observe();
+      await this.hooks.screenshot(`resumed-${context.step?.id ?? "run"}`);
+
+      await this.hooks.record("handoff.returned", {
+        interventionId,
+        decision: decision.decision,
+        humanEvents: this.events.length,
+        url: after.url,
+      });
+
+      return decision;
     } finally {
       // Control comes back even if the channel threw. A crashed operator console must not leave
       // the session permanently locked with nothing able to act on it.
       this.currentOwner = "automation";
       this.activeIntervention = undefined;
     }
-
-    // Re-observe before automation continues. Whatever the person did, the page has moved.
-    const after = await this.hooks.observe();
-    await this.hooks.screenshot(`resumed-${context.step?.id ?? "run"}`);
-
-    await this.hooks.record("handoff.returned", {
-      interventionId,
-      decision: decision.decision,
-      humanEvents: this.events.length,
-      url: after.url,
-    });
-
-    return decision;
   }
 
   /** The id of the intervention currently in flight, if any. */
@@ -306,11 +309,28 @@ export class CliInterventionChannel implements InterventionChannel {
 
     const answer = (await this.io.readLine()).trim().toLowerCase();
 
-    if (answer.startsWith("p")) return { decision: "proceed" };
-    if (answer.startsWith("d")) return { decision: "completed_by_human" };
-    // Anything else, including an empty line or a closed stdin, stops the run. The safe reading
-    // of "no clear answer" on a financial action is not to perform it.
-    return { decision: "abort", reason: answer ? `operator answered "${answer}"` : "no response" };
+    // Exact tokens only.
+    //
+    // Prefix matching read "please abort" as proceed and "do not proceed" as done — authorising
+    // an irreversible transfer from an answer that plainly said the opposite. Any rule that
+    // guesses at intent fails open eventually, and the whole point of this gate is that it
+    // must not. Anything not on this list, including an empty line or a closed stdin, aborts.
+    const decisions: Record<string, InterventionDecision> = {
+      p: { decision: "proceed" },
+      proceed: { decision: "proceed" },
+      d: { decision: "completed_by_human" },
+      done: { decision: "completed_by_human" },
+      a: { decision: "abort", reason: "operator aborted" },
+      abort: { decision: "abort", reason: "operator aborted" },
+    };
+
+    const chosen = decisions[answer];
+    if (chosen) return chosen;
+
+    return {
+      decision: "abort",
+      reason: answer ? `unrecognised answer "${answer}"` : "no response",
+    };
   }
 }
 

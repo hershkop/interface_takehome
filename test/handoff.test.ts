@@ -282,3 +282,121 @@ describe("CliInterventionChannel", () => {
     expect(text).toContain("locked out");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regressions from PR5 review.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("operator answers are matched exactly (review #1)", () => {
+  const ask = async (answer: string) => {
+    const channel = new CliInterventionChannel({
+      write: () => {},
+      readLine: async () => answer,
+    });
+    return (
+      await channel.request({
+        interventionId: "i",
+        runId: "r",
+        reason: "approval_required",
+        message: "m",
+        observedState: {},
+        requestedAt: new Date().toISOString(),
+      })
+    ).decision;
+  };
+
+  it("does not read a refusal as consent", async () => {
+    // Prefix matching authorised an irreversible transfer from "please abort", and skipped the
+    // step as already-done from "do not proceed". Any rule that guesses at intent fails open
+    // eventually, and this gate exists precisely so that it does not.
+    expect(await ask("please abort")).toBe("abort");
+    expect(await ask("do not proceed")).toBe("abort");
+    expect(await ask("don't")).toBe("abort");
+    expect(await ask("probably not")).toBe("abort");
+    expect(await ask("definitely")).toBe("abort");
+  });
+
+  it("accepts the documented tokens, in either short or long form", async () => {
+    expect(await ask("p")).toBe("proceed");
+    expect(await ask("proceed")).toBe("proceed");
+    expect(await ask("d")).toBe("completed_by_human");
+    expect(await ask("done")).toBe("completed_by_human");
+    expect(await ask("a")).toBe("abort");
+    expect(await ask("abort")).toBe("abort");
+  });
+
+  it("is case and whitespace insensitive but nothing more", async () => {
+    expect(await ask("  PROCEED  ")).toBe("proceed");
+    expect(await ask("Done")).toBe("completed_by_human");
+    expect(await ask("proceed please")).toBe("abort");
+  });
+
+  it("says why it refused, so the operator can answer again", async () => {
+    const channel = new CliInterventionChannel({ write: () => {}, readLine: async () => "yes" });
+    const decision = await channel.request({
+      interventionId: "i",
+      runId: "r",
+      reason: "approval_required",
+      message: "m",
+      observedState: {},
+      requestedAt: new Date().toISOString(),
+    });
+    expect(decision).toMatchObject({ decision: "abort" });
+    if (decision.decision === "abort") expect(decision.reason).toContain("yes");
+  });
+});
+
+describe("ownership spans the post-handoff capture (review #3)", () => {
+  it("is still held by the human while the resumed state is captured", async () => {
+    // Restoring ownership first left a window in which queued automation was permitted and the
+    // operator's final clicks were dropped by the ownership-filtered recorder — and it made the
+    // documented order ("restored after a fresh observation") untrue.
+    const ownerDuringCapture: string[] = [];
+    const channel = new ScriptedInterventionChannel(() => ({ decision: "proceed" }));
+
+    const controller: SessionController = new SessionController(channel, {
+      observe: async () => {
+        ownerDuringCapture.push(controller.owner);
+        return observation;
+      },
+      screenshot: async () => {
+        ownerDuringCapture.push(controller.owner);
+        return "s.png";
+      },
+      record: async () => {},
+    });
+
+    await controller.handOver({ runId: "r", reason: "approval_required", message: "m" });
+
+    // Four captures: observe + screenshot before handing over, observe + screenshot after.
+    //
+    // The first pair runs while automation still owns — it is automation recording the state
+    // that caused the stop, before anyone else can touch the page.
+    //
+    // The second pair is the one this test exists for: it must run while the HUMAN still owns,
+    // so a person finishing up is still recorded and automation is not yet eligible to act.
+    expect(ownerDuringCapture).toHaveLength(4);
+    expect(ownerDuringCapture.slice(0, 2)).toEqual(["automation", "automation"]);
+    expect(ownerDuringCapture.slice(2)).toEqual(["human", "human"]);
+    expect(controller.owner).toBe("automation");
+  });
+
+  it("still restores ownership when the post-capture itself throws", async () => {
+    const controller = new SessionController(
+      new ScriptedInterventionChannel(() => ({ decision: "proceed" })),
+      {
+        observe: async () => observation,
+        screenshot: async (label) => {
+          if (label.startsWith("resumed")) throw new Error("screenshot failed");
+          return "s.png";
+        },
+        record: async () => {},
+      },
+    );
+
+    await expect(
+      controller.handOver({ runId: "r", reason: "approval_required", message: "m" }),
+    ).rejects.toThrow("screenshot failed");
+    expect(controller.owner).toBe("automation");
+  });
+});

@@ -171,9 +171,11 @@ If automation could still click while someone is typing into the same form, cont
 transferred; the request would just be a message. Reads stay available, because the engine has
 to observe in order to take the session back sensibly.
 
-Ownership changes **before** the request is routed and is restored **after** a fresh observation
-— the page is almost certainly not where automation left it. Control returns even if the
-operator channel throws, because a crashed console must not leave a session permanently locked.
+Ownership changes **before** the request is routed, and the resumed state is captured **while
+the human still holds it** — a person finishing up is still clicking, and automation must not be
+eligible to act until the engine has seen where the page ended up. Only then does control
+return, and it returns even if the operator channel throws, because a crashed console must not
+leave a session permanently locked.
 
 ### What the human did is recorded, without what they typed
 
@@ -182,9 +184,17 @@ one-off injection dies at the first navigation, and an audit trail that silently
 looks exactly like a person who did nothing.
 
 Each event carries the field's identity and the **length** of what was entered, never the
-characters. That is what an auditor needs; the contents are precisely the data that must not be
-persisted. Written to `human-actions.json`, separate from the event log, because "what did a
-person do to this institution's data" is a different question from "what did the system do".
+characters. Reading a label off the element is safe for a `<button>Transfer</button>` and is
+exactly what an auditor wants — but on a `contenteditable` that text *is* what the person typed,
+so nothing editable contributes its content, only its stable attributes and a length.
+
+`input` is captured as well as `change`, coalesced so typing does not emit one event per
+keystroke: an edit that never blurs — because the operator submits, or the page navigates —
+fires no `change` and would otherwise vanish. Navigation is reported from the driver side,
+since a document being torn down cannot announce its own departure.
+
+Written to `human-actions.json`, separate from the event log, because "what did a person do to
+this institution's data" is a different question from "what did the system do".
 
 ### What is a stand-in, and what is not
 
