@@ -1,10 +1,33 @@
 {
-  "allowedOrigins": ["http://localhost:18080"],
-  "allowedPaths": ["/parabank/**"],
-  "allowedActions": ["navigate", "wait", "extract", "assert"],
-  "blockedActions": ["click", "fill", "select"],
-  "requireApprovalFor": ["approval_required"],
+  "allowedOrigins": [
+    "http://localhost:18080"
+  ],
+  "allowedPaths": [
+    "/parabank/**"
+  ],
+  "allowedActions": [
+    "navigate",
+    "wait",
+    "extract",
+    "assert"
+  ],
+  "blockedActions": [
+    "click",
+    "fill",
+    "select"
+  ],
+  "requireApprovalFor": [
+    "approval_required"
+  ],
   "maxSteps": 25,
   "runTimeoutMs": 120000,
-  "redactPatterns": []
+  "redactPatterns": [],
+  "riskyControls": [
+    "^transfer$",
+    "^pay$",
+    "^submit",
+    "confirm",
+    "^delete",
+    "withdraw"
+  ]
 }

@@ -27,6 +27,7 @@ import {
   type Handler,
   type OutputDefinition,
   type Policy,
+  type Target,
   type RiskClass,
   type RunError,
   type RunResult,
@@ -45,6 +46,8 @@ import {
   coerce,
   coerceInput,
   isSensitiveSecretKey,
+  resolveConditionTemplates,
+  resolveTargetTemplates,
   resolveTemplate,
   TemplateError,
   type TemplateScope,
@@ -310,7 +313,9 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       if ("error" in collected) {
         terminal = { kind: "failure", error: collected.error };
       } else {
-        const ok = await context.surface.verify(artifact.checkpoint);
+        const ok = await context.surface.verify(
+          resolveConditionTemplates(artifact.checkpoint, context.scope),
+        );
         await recorder.event({
           type: ok ? "checkpoint.ok" : "checkpoint.failed",
           detail: { condition: describeCondition(artifact.checkpoint) },
@@ -579,6 +584,11 @@ async function executeStep(
   const stepRef = { id: step.id, index };
 
   const resolve = (value: string): string => resolveTemplate(value, context.scope);
+  // Targets are resolved too: a parameter can live in a locator rather than a value.
+  const resolveTarget = (target: Target): Target =>
+    resolveTargetTemplates(target, context.scope) as Target;
+  const resolveCondition = (condition: Condition): Condition =>
+    resolveConditionTemplates(condition, context.scope);
 
   try {
     switch (action.action) {
@@ -590,32 +600,32 @@ async function executeStep(
           : fail(step, index, result.errorCode ?? "APP_ERROR", result.error ?? "navigation failed");
       }
       case "click": {
-        const result = await surface.click(action.target);
+        const result = await surface.click(resolveTarget(action.target));
         return result.ok
           ? { ok: true }
           : fail(step, index, result.errorCode ?? "APP_ERROR", result.error ?? "click failed");
       }
       case "fill": {
-        const result = await surface.fill(action.target, resolve(action.value));
+        const result = await surface.fill(resolveTarget(action.target), resolve(action.value));
         return result.ok
           ? { ok: true }
           : fail(step, index, result.errorCode ?? "APP_ERROR", result.error ?? "fill failed");
       }
       case "select": {
-        const result = await surface.select(action.target, resolve(action.value));
+        const result = await surface.select(resolveTarget(action.target), resolve(action.value));
         return result.ok
           ? { ok: true }
           : fail(step, index, result.errorCode ?? "APP_ERROR", result.error ?? "select failed");
       }
       case "wait": {
-        const result = await surface.waitFor(action.condition, action.timeoutMs);
+        const result = await surface.waitFor(resolveCondition(action.condition), action.timeoutMs);
         return result.ok
           ? { ok: true }
           : fail(step, index, "STEP_TIMEOUT", result.error ?? "wait timed out");
       }
       case "extract": {
         const result = await surface.extract(
-          action.target,
+          resolveTarget(action.target),
           ...(action.attribute === undefined ? [] : [action.attribute]),
         );
         if (!result.ok) {
@@ -631,7 +641,7 @@ async function executeStep(
         return { ok: true };
       }
       case "assert": {
-        const ok = await surface.verify(action.condition);
+        const ok = await surface.verify(resolveCondition(action.condition));
         return ok
           ? { ok: true }
           : fail(
@@ -708,7 +718,10 @@ async function verifyPostcondition(
   // Polled, not sampled. A confirmation screen that takes a moment to render is the normal
   // case, and treating "not true yet" as "not true" was what pushed the engine toward
   // re-clicking in the first place.
-  const settled = await context.surface.waitFor(step.postcondition, context.postconditionTimeoutMs);
+  const settled = await context.surface.waitFor(
+    resolveConditionTemplates(step.postcondition, context.scope),
+    context.postconditionTimeoutMs,
+  );
   if (settled.ok) return undefined;
 
   // A postcondition is what makes a click *verified* rather than assumed. Without it a step
@@ -754,7 +767,8 @@ async function applyHandlers(
 ): Promise<StepDisposition> {
   for (const handler of handlers) {
     if (!inScope(handler, step.id)) continue;
-    if (!(await context.surface.verify(handler.match))) continue;
+    if (!(await context.surface.verify(resolveConditionTemplates(handler.match, context.scope))))
+      continue;
 
     await context.recorder.event({
       type: "handler.matched",
@@ -880,7 +894,9 @@ async function applyRemedy(
 ): Promise<RemedyOutcome> {
   switch (disposition.remedy) {
     case "dismiss": {
-      const result = await context.surface.click(disposition.target);
+      const result = await context.surface.click(
+        resolveTargetTemplates(disposition.target, context.scope) as Target,
+      );
       if (result.ok) return { ok: true };
       return result.errorCode === "POLICY_DENIED"
         ? { ok: false, denied: true, reason: result.error ?? "refused by policy" }
@@ -1024,7 +1040,7 @@ async function collectOutputs(
       raw = captured === undefined ? undefined : String(captured);
     } else {
       const result = await context.surface.extract(
-        definition.source.target,
+        resolveTargetTemplates(definition.source.target, context.scope) as Target,
         ...(definition.source.attribute === undefined ? [] : [definition.source.attribute]),
       );
       raw = result.ok ? result.value : undefined;

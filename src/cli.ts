@@ -10,6 +10,9 @@ import { CapabilityArtifact, Policy, type RunResult } from "./schema.js";
 import { replay } from "./replay.js";
 import { loginToParabank } from "./parabank.js";
 import { CliInterventionChannel } from "./handoff.js";
+import { discover } from "./discovery.js";
+import { invoke, loadCatalog, toToolDefinition } from "./catalog.js";
+import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
 interface ParsedArgs {
@@ -23,6 +26,10 @@ interface ParsedArgs {
   goal: string | undefined;
   baseUrl: string | undefined;
   policyPath: string | undefined;
+  capability: string | undefined;
+  out: string | undefined;
+  maxSteps: number | undefined;
+  allowDraft: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -31,6 +38,9 @@ function parseArgs(argv: string[]): ParsedArgs {
   let baseUrl: string | undefined;
   let policyPath: string | undefined;
   let goal: string | undefined;
+  let capability: string | undefined;
+  let out: string | undefined;
+  let maxSteps: number | undefined;
 
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -44,6 +54,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       policyPath = argv[++i];
     } else if (arg === "--goal") {
       goal = argv[++i];
+    } else if (arg === "--capability") {
+      capability = argv[++i];
+    } else if (arg === "--out") {
+      out = argv[++i];
+    } else if (arg === "--max-steps") {
+      maxSteps = Number.parseInt(argv[++i] ?? "", 10) || undefined;
     } else if (!arg.startsWith("-") && artifactPath === undefined) {
       artifactPath = arg;
     }
@@ -60,13 +76,20 @@ function parseArgs(argv: string[]): ParsedArgs {
     goal,
     baseUrl,
     policyPath,
+    capability,
+    out,
+    maxSteps,
+    allowDraft: argv.includes("--allow-draft"),
   };
 }
 
 const USAGE = `
 Usage:
-  npm run cli -- validate <artifact.json>
+  npm run cli -- discover --goal "..." --capability <id> --out <file> [--input k=v]
   npm run cli -- replay <artifact.json> --input name=value [options]
+  npm run cli -- validate <artifact.json>
+  npm run cli -- capabilities [--json]
+  npm run cli -- invoke <capabilityId> --input name=value [options]
 
 Options:
   --input k=v     Invocation input. Repeatable.
@@ -78,14 +101,42 @@ Options:
   --goal TEXT     What this invocation is for; shown to the operator on escalation.
   --trace         Write a raw Playwright trace. UNREDACTED — see README.
   --json          Print the RunResult as JSON and nothing else.
+  --allow-draft   invoke only: run a capability still marked draft.
+
+discover options:
+  --goal TEXT       What to accomplish. Required.
+  --capability ID   lower_snake_case id for the recorded capability. Required.
+  --out FILE        Where to write the artifact. Required.
+  --max-steps N     Cap on model turns (default 25).
+  Requires ANTHROPIC_API_KEY (put it in .env).
 `;
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
-  if (!args.command || !args.artifactPath) {
+  if (!args.command) {
     process.stdout.write(USAGE);
-    process.exit(args.command ? 1 : 0);
+    process.exit(0);
+  }
+
+  if (args.command === "capabilities") {
+    await printCatalog(args.json);
+    return;
+  }
+
+  if (args.command === "discover") {
+    await runDiscovery(args);
+    return;
+  }
+
+  if (args.command === "invoke") {
+    await runInvoke(args);
+    return;
+  }
+
+  if (!args.artifactPath) {
+    process.stdout.write(USAGE);
+    process.exit(1);
   }
 
   const raw: unknown = JSON.parse(await readFile(args.artifactPath, "utf8"));
@@ -177,13 +228,7 @@ async function main(): Promise<void> {
 
   // Exit codes distinguish the four statuses, so a caller can branch without parsing output.
   // A business outcome is NOT an error: "no such account" is a legitimate answer.
-  process.exit(
-    result.status === "success" || result.status === "business_outcome"
-      ? 0
-      : result.status === "escalated"
-        ? 2
-        : 1,
-  );
+  process.exit(exitCodeFor(result));
 }
 
 
@@ -195,6 +240,149 @@ async function main(): Promise<void> {
  * provided. Buffering from the start makes a scripted operator behave the same as a person at a
  * terminal, which is what makes the handoff testable end to end.
  */
+
+const CAPABILITIES_DIR = "capabilities";
+
+async function printCatalog(asJson: boolean): Promise<void> {
+  const { entries, invalid } = await loadCatalog(CAPABILITIES_DIR);
+
+  if (asJson) {
+    // Exactly what an agent would be handed: approved capabilities only. A draft it can see is
+    // a draft it will call.
+    const { entries: callable } = await loadCatalog(CAPABILITIES_DIR, { agentFacing: true });
+    process.stdout.write(`${JSON.stringify(callable.map(toToolDefinition), null, 2)}\n`);
+    return;
+  }
+
+  process.stdout.write(`\n${entries.length} capability(ies) in ${CAPABILITIES_DIR}/\n\n`);
+  for (const entry of entries) {
+    const flags = [entry.status, `risk=${entry.risk}`].join(", ");
+    process.stdout.write(`  ${entry.capabilityId}  v${entry.version}  [${flags}]\n`);
+    process.stdout.write(`    ${entry.description}\n`);
+    const inputs = Object.entries(entry.artifact.inputs)
+      .map(([n, d]) => `${n}: ${d.type}${d.required ? "" : "?"}`)
+      .join(", ");
+    const outputs = Object.entries(entry.artifact.outputs)
+      .map(([n, d]) => `${n}: ${d.type}`)
+      .join(", ");
+    process.stdout.write(`    in  (${inputs || "none"})\n`);
+    process.stdout.write(`    out (${outputs || "none"})\n\n`);
+  }
+  for (const bad of invalid) {
+    process.stderr.write(`  INVALID  ${bad.path}: ${bad.reason}\n`);
+  }
+}
+
+async function runInvoke(args: ParsedArgs): Promise<void> {
+  const capabilityId = args.artifactPath;
+  if (!capabilityId) {
+    process.stderr.write("invoke needs a capability id. Try: npm run cli -- capabilities\n");
+    process.exit(1);
+  }
+
+  const policy = args.policyPath
+    ? Policy.parse(JSON.parse(await readFile(args.policyPath, "utf8")))
+    : defaultPolicy();
+
+  const lines = args.interactive ? createLineReader() : undefined;
+  const channel = lines
+    ? new CliInterventionChannel({
+        write: (text) => process.stdout.write(text),
+        readLine: () => lines.next(),
+      })
+    : undefined;
+
+  const result = await invoke(CAPABILITIES_DIR, capabilityId, args.inputs, {
+    policy,
+    allowDraft: args.allowDraft,
+    ...(channel ? { interventionChannel: channel } : {}),
+    secrets: {
+      parabankUsername: config.parabank.username,
+      parabankPassword: config.parabank.password,
+    },
+    ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
+    headed: args.headed,
+    trace: args.trace ? "unredacted" : "off",
+    reauthenticate: loginToParabank,
+  });
+
+  lines?.close();
+
+  if ("notFound" in result) {
+    process.stderr.write(
+      `no capability "${capabilityId}". Available: ${result.notFound.join(", ") || "(none)"}\n`,
+    );
+    process.exit(1);
+  }
+  if ("refused" in result) {
+    process.stderr.write(`${result.refused}\n`);
+    process.exit(1);
+  }
+
+  if (args.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  else printResult(result);
+  // The same four-state contract `replay` exposes. Collapsing escalated into failure would stop
+  // an agent distinguishing "a human is now involved" from "this did not work".
+  process.exit(exitCodeFor(result));
+}
+
+/** 0 = success or business outcome, 2 = escalated, 1 = failure. */
+function exitCodeFor(result: RunResult): number {
+  if (result.status === "success" || result.status === "business_outcome") return 0;
+  return result.status === "escalated" ? 2 : 1;
+}
+
+async function runDiscovery(args: ParsedArgs): Promise<void> {
+  if (!args.goal || !args.capability || !args.out) {
+    process.stderr.write("discover needs --goal, --capability and --out.\n");
+    process.exit(1);
+  }
+  if (!config.anthropicApiKey) {
+    process.stderr.write(
+      "\nANTHROPIC_API_KEY is not set.\n" +
+        "Discovery is the one path that needs a model. Add it to .env:\n" +
+        "  ANTHROPIC_API_KEY=sk-ant-...\n\n",
+    );
+    process.exit(1);
+  }
+
+  const policy = args.policyPath
+    ? Policy.parse(JSON.parse(await readFile(args.policyPath, "utf8")))
+    : defaultPolicy();
+
+  process.stdout.write(`\ndiscovering: ${args.goal}\n\n`);
+
+  const result = await discover({
+    goal: args.goal,
+    capabilityId: args.capability,
+    baseUrl: args.baseUrl ?? config.parabank.baseUrl,
+    policy,
+    inputs: args.inputs,
+    secrets: {
+      parabankUsername: config.parabank.username,
+      parabankPassword: config.parabank.password,
+    },
+    ...(args.maxSteps === undefined ? {} : { maxSteps: args.maxSteps }),
+    headed: args.headed,
+    apiKey: config.anthropicApiKey,
+  });
+
+  if (result.status !== "recorded") {
+    process.stderr.write(`\n${result.status.toUpperCase()}: ${result.reason}\n`);
+    process.stderr.write(`  model calls : ${result.modelCalls}\n`);
+    process.stderr.write(`  evidence    : ${result.evidenceDir}\n\n`);
+    process.exit(1);
+  }
+
+  await writeFile(args.out, `${JSON.stringify(result.artifact, null, 2)}\n`, "utf8");
+  process.stdout.write(`\nRECORDED  ${result.artifact.capabilityId} v${result.artifact.version}\n`);
+  process.stdout.write(`  status      : ${result.artifact.metadata.status}\n`);
+  process.stdout.write(`  steps       : ${result.artifact.steps.length}\n`);
+  process.stdout.write(`  model calls : ${result.modelCalls}\n`);
+  process.stdout.write(`  artifact    : ${args.out}\n`);
+  process.stdout.write(`  evidence    : ${result.evidenceDir}\n\n`);
+}
+
 function createLineReader(): { next: () => Promise<string>; close: () => void } {
   const buffered: string[] = [];
   const waiting: Array<(line: string) => void> = [];

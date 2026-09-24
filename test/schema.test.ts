@@ -397,3 +397,42 @@ describe("input defaults match their declared type (review #6)", () => {
     expect(CapabilityArtifact.safeParse(a).success).toBe(true);
   });
 });
+
+describe("an output's declared type must match its coercion (PR6 review #3)", () => {
+  it("rejects a string output with a numeric coercion", () => {
+    // `currency` returns a number whatever the declaration says, so the catalog would advertise
+    // a type the capability never returns — a contract that lies to every calling agent.
+    const a = baseArtifact() as any;
+    a.outputs.balance = {
+      type: "string",
+      source: { kind: "variable", name: "balanceText" },
+      coerce: "currency",
+    };
+    const r = CapabilityArtifact.safeParse(a);
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toContain("produces a number");
+  });
+
+  it("accepts matching pairs", () => {
+    for (const [type, coerce] of [
+      ["number", "currency"],
+      ["number", "int"],
+      ["number", "number"],
+      ["string", "trim"],
+    ]) {
+      const a = baseArtifact() as any;
+      a.outputs.balance = {
+        type,
+        source: { kind: "variable", name: "balanceText" },
+        coerce,
+      };
+      expect(CapabilityArtifact.safeParse(a).success, `${type}/${coerce}`).toBe(true);
+    }
+  });
+
+  it("leaves an uncoerced output's declared type alone", () => {
+    const a = baseArtifact() as any;
+    a.outputs.balance = { type: "string", source: { kind: "variable", name: "balanceText" } };
+    expect(CapabilityArtifact.safeParse(a).success).toBe(true);
+  });
+});

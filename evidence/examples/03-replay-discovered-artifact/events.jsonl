@@ -1,0 +1,19 @@
+{"timestamp":"2026-09-24T15:09:39.315Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.start","stepId":"navigate_0","stepIndex":0,"actionType":"navigate","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:39.371Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.ok","stepId":"navigate_0","stepIndex":0,"actionType":"navigate","durationMs":56}
+{"timestamp":"2026-09-24T15:09:39.371Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.start","stepId":"fill_1","stepIndex":1,"actionType":"fill","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:39.431Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.ok","stepId":"fill_1","stepIndex":1,"actionType":"fill","durationMs":60}
+{"timestamp":"2026-09-24T15:09:39.431Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.start","stepId":"fill_2","stepIndex":2,"actionType":"fill","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:39.452Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.ok","stepId":"fill_2","stepIndex":2,"actionType":"fill","durationMs":21}
+{"timestamp":"2026-09-24T15:09:39.452Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.start","stepId":"click_3","stepIndex":3,"actionType":"click","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:39.525Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.ok","stepId":"click_3","stepIndex":3,"actionType":"click","durationMs":73}
+{"timestamp":"2026-09-24T15:09:39.525Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.start","stepId":"click_4","stepIndex":4,"actionType":"click","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:39.750Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.ok","stepId":"click_4","stepIndex":4,"actionType":"click","durationMs":225}
+{"timestamp":"2026-09-24T15:09:39.751Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.start","stepId":"wait_5","stepIndex":5,"actionType":"wait","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:39.980Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.ok","stepId":"wait_5","stepIndex":5,"actionType":"wait","durationMs":229}
+{"timestamp":"2026-09-24T15:09:39.981Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.start","stepId":"extract_6","stepIndex":6,"actionType":"extract","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:39.985Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"extract.ok","stepId":"extract_6","stepIndex":6,"detail":{"as":"balance","value":"-$2300.00"}}
+{"timestamp":"2026-09-24T15:09:39.985Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.ok","stepId":"extract_6","stepIndex":6,"actionType":"extract","durationMs":4}
+{"timestamp":"2026-09-24T15:09:39.985Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.start","stepId":"extract_7","stepIndex":7,"actionType":"extract","detail":{"attempt":1}}
+{"timestamp":"2026-09-24T15:09:39.989Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"extract.ok","stepId":"extract_7","stepIndex":7,"detail":{"as":"accountType","value":"CHECKING"}}
+{"timestamp":"2026-09-24T15:09:39.989Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"step.ok","stepId":"extract_7","stepIndex":7,"actionType":"extract","durationMs":4}
+{"timestamp":"2026-09-24T15:09:39.991Z","runId":"replay-20260924T150938-5nuwd","phase":"replay","type":"checkpoint.ok","detail":{"condition":"text \"Account Details\""}}

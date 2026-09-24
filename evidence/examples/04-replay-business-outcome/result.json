@@ -1,0 +1,15 @@
+{
+  "status": "business_outcome",
+  "outcome": "account_not_found",
+  "detail": {
+    "requestedAccountId": "99999"
+  },
+  "evidence": {
+    "runId": "replay-20260924T150941-x8bbk",
+    "directory": "evidence/replay-20260924T150941-x8bbk",
+    "eventLog": "evidence/replay-20260924T150941-x8bbk/events.jsonl",
+    "traceUnredacted": false,
+    "screenshots": [],
+    "modelCalls": 0
+  }
+}

@@ -122,3 +122,78 @@ describe("coerceInput", () => {
     if (!r.ok) expect(r.reason).toContain("artifact");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A parameter can hide in three places, not one. Each of these was found by
+// replaying a capability the model had just discovered.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("resolveTargetTemplates", () => {
+  it("resolves a reference inside an accessible name", async () => {
+    // The discovered flow reached an account by clicking a link whose accessible name IS the
+    // account number. Nothing in that step has a value — the parameter lives in the target.
+    const { resolveTargetTemplates } = await import("../src/template.js");
+    const resolved = resolveTargetTemplates(
+      {
+        description: "account {{inputs.accountId}}",
+        candidates: [
+          { strategy: "role", role: "link", name: "{{inputs.accountId}}" },
+          { strategy: "css", value: "#acct-{{inputs.accountId}}" },
+        ],
+      },
+      scope(),
+    );
+    expect(resolved.description).toBe("account 12678");
+    expect(resolved.candidates[0]).toMatchObject({ name: "12678" });
+    expect(resolved.candidates[1]).toMatchObject({ value: "#acct-12678" });
+  });
+
+  it("leaves a coordinate candidate alone", async () => {
+    const { resolveTargetTemplates } = await import("../src/template.js");
+    const resolved = resolveTargetTemplates(
+      { candidates: [{ strategy: "coordinates", x: 1, y: 2 }] },
+      scope(),
+    );
+    expect(resolved.candidates[0]).toEqual({ strategy: "coordinates", x: 1, y: 2 });
+  });
+
+  it("leaves an unresolvable reference in place rather than blanking the locator", async () => {
+    // Substituting "" would turn a specific locator into one that matches everything.
+    const { resolveTargetTemplates } = await import("../src/template.js");
+    const resolved = resolveTargetTemplates(
+      { candidates: [{ strategy: "text", value: "{{inputs.missing}}" }] },
+      scope(),
+    );
+    expect(resolved.candidates[0]).toMatchObject({ value: "{{inputs.missing}}" });
+  });
+});
+
+describe("resolveConditionTemplates", () => {
+  it("resolves text, title and role-name conditions", async () => {
+    const { resolveConditionTemplates } = await import("../src/template.js");
+    expect(
+      resolveConditionTemplates({ kind: "text", value: "Account {{inputs.accountId}}" }, scope()),
+    ).toMatchObject({ value: "Account 12678" });
+    expect(
+      resolveConditionTemplates({ kind: "role", role: "link", name: "{{inputs.accountId}}" }, scope()),
+    ).toMatchObject({ name: "12678" });
+  });
+
+  it("recurses through all/any/not", async () => {
+    // Waiting for the literal text "12678" is waiting for one specific account.
+    const { resolveConditionTemplates } = await import("../src/template.js");
+    const resolved = resolveConditionTemplates(
+      {
+        kind: "all",
+        conditions: [
+          { kind: "text", value: "{{inputs.accountId}}" },
+          { kind: "not", condition: { kind: "text", value: "{{inputs.accountId}} not found" } },
+        ],
+      },
+      scope(),
+    ) as { conditions: Array<Record<string, unknown>> };
+
+    expect(resolved.conditions[0]).toMatchObject({ value: "12678" });
+    expect(resolved.conditions[1]?.condition).toMatchObject({ value: "12678 not found" });
+  });
+});

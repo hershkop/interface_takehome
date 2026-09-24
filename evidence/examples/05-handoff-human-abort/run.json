@@ -1,0 +1,47 @@
+{
+  "runId": "replay-20260924T150942-fyltj",
+  "phase": "replay",
+  "policy": {
+    "allowedOrigins": [
+      "http://localhost:18080"
+    ],
+    "allowedPaths": [
+      "/parabank/**"
+    ],
+    "allowedActions": [
+      "navigate",
+      "click",
+      "fill",
+      "select",
+      "wait",
+      "extract",
+      "assert"
+    ],
+    "blockedActions": [],
+    "requireApprovalFor": [
+      "approval_required"
+    ],
+    "riskyControls": [
+      "^transfer$",
+      "^pay$",
+      "^submit",
+      "confirm",
+      "^delete",
+      "withdraw"
+    ],
+    "maxSteps": 40,
+    "runTimeoutMs": 300000,
+    "redactPatterns": []
+  },
+  "capabilityId": "transfer_funds",
+  "capabilityVersion": "1.0.0",
+  "artifactStatus": "approved",
+  "risk": "safe",
+  "baseUrl": "http://localhost:18080/parabank",
+  "inputs": {
+    "fromAccount": "12345",
+    "toAccount": "12678",
+    "amount": "25"
+  },
+  "startedAt": "2026-09-24T15:09:42.621Z"
+}
