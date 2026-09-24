@@ -26,13 +26,15 @@ import {
   type ErrorCode,
   type Handler,
   type OutputDefinition,
+  type Policy,
   type RiskClass,
   type RunError,
   type RunResult,
 } from "./schema.js";
 import { EvidenceRecorder, newRunId } from "./evidence.js";
+import { GuardedSurface, PolicyGuard } from "./safety.js";
 import { createRedactor, type Redactor } from "./redact.js";
-import { PlaywrightSurface, describeCondition } from "./surface.js";
+import { PlaywrightSurface, describeCondition, type Surface } from "./surface.js";
 import {
   coerce,
   coerceInput,
@@ -57,6 +59,11 @@ export interface ReplayOptions {
   /** Point at a specific Chromium build. */
   executablePath?: string;
   /**
+   * Enforced for the whole run. Omitting it is not "no policy" — the caller must supply one,
+   * because a guard that can be forgotten is not a guard.
+   */
+  policy: Policy;
+  /**
    * Supplied by the handoff layer in PR5. Until then, a step that needs approval returns
    * `escalated` rather than pretending it could proceed.
    */
@@ -67,7 +74,8 @@ export interface ReplayOptions {
    * remedy without a provider fails loudly instead of silently continuing logged out.
    */
   reauthenticate?: (
-    surface: PlaywrightSurface,
+    /** Policy-guarded: a login routine cannot type or click outside what policy permits. */
+    surface: Surface,
     /**
      * Invocation-scoped, not process-scoped. A callback that reached for global configuration
      * would re-authenticate against the DEFAULT tenant after a session expiry, and the run
@@ -79,7 +87,10 @@ export interface ReplayOptions {
 
 /** Everything the engine needs while a run is in flight. */
 interface RunContext {
-  surface: PlaywrightSurface;
+  /** Policy-guarded. Everything that drives the browser goes through this. */
+  surface: Surface;
+  /** The raw surface, used only for evidence capture (screenshots need the Page). */
+  rawSurface: PlaywrightSurface;
   recorder: EvidenceRecorder;
   scope: TemplateScope;
   redact: Redactor;
@@ -91,6 +102,7 @@ interface RunContext {
   capabilityRisk: RiskClass;
   /** How long a postcondition is polled before it is treated as unmet. */
   postconditionTimeoutMs: number;
+  guard: PolicyGuard;
 }
 
 type StepDisposition =
@@ -130,13 +142,24 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
   // matched by DECLARATION: an artifact author who writes `sensitive: true` has said this value
   // is regulated, and that statement has to actually do something — otherwise the field is a
   // promise the system does not keep, which is worse than not offering it.
-  const sensitiveInputValues = Object.entries(artifact.inputs)
+  const sensitiveInputNames = Object.entries(artifact.inputs)
     .filter(([, definition]) => definition.sensitive)
-    .map(([name]) => inputs.values[name])
+    .map(([name]) => name);
+
+  const sensitiveInputValues = sensitiveInputNames
+    .map((name) => inputs.values[name])
     .filter((value): value is string | number => value !== undefined && value !== null)
     .map(String);
 
+  const guard = new PolicyGuard(options.policy);
+
+  const fits = guard.checkArtifactFits(artifact.steps.length);
+  if (!fits.allowed) return earlyFailure("POLICY_DENIED", fits.reason ?? "artifact exceeds policy");
+
   const redact = createRedactor({
+    // Policy-configured patterns extend the built-ins rather than replacing them, so a tenant
+    // can add its own identifier formats without giving up API-key or SSN scrubbing.
+    patterns: options.policy.redactPatterns,
     literals: [
       ...Object.entries(secrets)
         .filter(([key]) => isSensitiveSecretKey(key))
@@ -155,12 +178,23 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
 
   const baseUrl = options.baseUrl ?? artifact.target.baseUrl;
   await recorder.writeRunHeader({
+    // The whole normalised policy. A partial record cannot answer "why was this allowed?" —
+    // which is the only question the record exists to answer. It passes through the redactor
+    // like everything else, so a pattern that embeds a literal secret is still scrubbed.
+    policy: options.policy,
     capabilityId: artifact.capabilityId,
     capabilityVersion: artifact.version,
     artifactStatus: artifact.metadata.status,
     risk: artifact.metadata.risk,
     baseUrl,
-    inputs: inputs.values,
+    // Masked by NAME, not by matching the value.
+    //
+    // Literal substitution alone is not enough here: the redactor deliberately ignores literals
+    // shorter than three characters, because scrubbing every "42" out of a log destroys it. A
+    // PIN declared sensitive is exactly that short, and would have been written verbatim. An
+    // explicit declaration deserves a mechanism that does not depend on the value's length or
+    // on it coincidentally matching a pattern.
+    inputs: maskSensitive(inputs.values, sensitiveInputNames),
     startedAt: new Date().toISOString(),
   });
 
@@ -178,10 +212,16 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       traceDir: recorder.directory,
       defaultTimeoutMs: options.stepTimeoutMs ?? 10_000,
       ...(options.executablePath ? { executablePath: options.executablePath } : {}),
+      navigationAllowed: guard.navigationAllowed,
+    });
+
+    const guardedSurface = new GuardedSurface(surface, guard, (reason) => {
+      void recorder.event({ type: "policy.denied", detail: { reason } });
     });
 
     const context: RunContext = {
-      surface,
+      surface: guardedSurface,
+      rawSurface: surface,
       recorder,
       redact,
       scope: { baseUrl, inputs: inputs.values, secrets, vars: {} },
@@ -193,9 +233,34 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       // a capability marked approval_required executed unattended whenever its steps happened
       // not to restate the risk — which is the documented inheritance rule doing nothing.
       capabilityRisk: artifact.metadata.risk,
+      guard,
     };
 
-    terminal = await runSteps(artifact.steps, artifact.handlers, context);
+    guard.begin();
+
+    // A true wall-clock ceiling needs three things, because checking between steps is not one.
+    //
+    //   The guarded surface refuses any action once the deadline has passed, and clamps every
+    //   wait to the remaining budget, so the common case never overruns.
+    //
+    //   The step loop checks between steps, which catches a chain of cheap operations.
+    //
+    //   This race is the backstop for the case neither covers: one operation that blocks longer
+    //   than the whole budget — a locator resolving against a hung page, a postcondition poll, a
+    //   remedy that stalls. Without it, `runTimeoutMs` is advisory.
+    terminal = await withDeadline(
+      runSteps(artifact.steps, artifact.handlers, context),
+      guard.remainingMs(),
+      () => ({
+        kind: "failure" as const,
+        error: {
+          code: "POLICY_DENIED" as const,
+          message: `run exceeded the policy timeout of ${options.policy.runTimeoutMs}ms`,
+          recoverable: false,
+          attempts: 1,
+        },
+      }),
+    );
 
     if (!terminal) {
       // Outputs are read before the checkpoint, so a failed checkpoint can still report what
@@ -256,6 +321,46 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
   return result;
 }
 
+
+
+/**
+ * Resolves the work, or the timeout value if the budget runs out first.
+ *
+ * The losing promise is not cancelled — there is no safe way to abort a Playwright call
+ * mid-flight — but the run stops waiting on it and the surface is closed in the caller's
+ * `finally`, which tears down whatever it was doing.
+ */
+async function withDeadline<T>(
+  work: Promise<T>,
+  budgetMs: number,
+  onTimeout: () => T,
+): Promise<T> {
+  if (budgetMs <= 0) return onTimeout();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout()), budgetMs);
+  });
+
+  try {
+    return await Promise.race([work, expiry]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Replaces declared-sensitive values with a marker, regardless of their length or shape. */
+function maskSensitive(
+  values: Record<string, unknown>,
+  sensitiveNames: readonly string[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...values };
+  for (const name of sensitiveNames) {
+    if (name in out) out[name] = "[REDACTED]";
+  }
+  return out;
+}
+
 /** Defensive: `terminal` is set on every path that does not produce outputs. */
 function unexpectedTerminal(): TerminalOutcome {
   return {
@@ -301,7 +406,32 @@ async function runSteps(
       const approval = await checkApproval(step, index, context);
       if (approval) return approval;
 
+      // Budget checks are per attempt, not per step: a retrying step consumes budget, which is
+      // what stops a flapping recovery from running for an hour inside a "40 step" policy.
+      const budget = context.guard.countStep();
+      if (!budget.allowed) return policyDenied(step, index, budget.reason);
+      const deadline = context.guard.checkDeadline();
+      if (!deadline.allowed) return policyDenied(step, index, deadline.reason);
+      void deadline;
+
       const outcome = await executeStep(step, index, context);
+
+      // Anything the browser-level guard refused is a policy denial even if the action itself
+      // reported success — a click that tried to leave the allowlist "worked" as a click.
+      const blocked = context.surface.takeBlockedNavigations();
+      if (blocked.length > 0) {
+        await context.recorder.event({
+          type: "policy.navigation_blocked",
+          stepId: step.id,
+          stepIndex: index,
+          detail: { urls: blocked },
+        });
+        return policyDenied(
+          step,
+          index,
+          `navigation to ${blocked.join(", ")} was blocked by the origin allowlist`,
+        );
+      }
 
       // The after-phase needs to know whether the step actually ran, because that decides
       // whether recovery may retry it. See applyHandlers.
@@ -344,9 +474,21 @@ async function runSteps(
         break;
       }
 
+      // A policy denial is terminal. Repeating a refused action just produces the same
+      // refusal more slowly, and retrying it would misreport a guard decision as flakiness.
+      if (outcome.error.code === "POLICY_DENIED") {
+        await context.recorder.event({
+          type: "policy.denied",
+          stepId: step.id,
+          stepIndex: index,
+          actionType: step.action.action,
+          detail: { reason: outcome.error.message },
+        });
+        return { kind: "failure", error: outcome.error };
+      }
+
       // Retries are bounded and only apply where the artifact declared them. A validation
-      // error or a policy denial is never retried — repeating a rejected action just produces
-      // the same rejection more slowly.
+      // error is never retried either.
       if (attempt < maxAttempts) {
         await context.recorder.event({
           type: "step.retry",
@@ -534,6 +676,20 @@ async function verifyPostcondition(
   };
 }
 
+
+function policyDenied(step: ArtifactStep, index: number, reason: string | undefined): TerminalOutcome {
+  return {
+    kind: "failure",
+    error: {
+      code: "POLICY_DENIED",
+      message: reason ?? "refused by policy",
+      step: { id: step.id, index },
+      recoverable: false,
+      attempts: 1,
+    },
+  };
+}
+
 // ─── Handlers ──────────────────────────────────────────────────────────────────
 
 async function applyHandlers(
@@ -608,22 +764,31 @@ async function applyHandlers(
 
     const recovered = await applyRemedy(disposition, context);
     await context.recorder.event({
-      type: recovered ? "handler.recovered" : "handler.recovery_failed",
+      type: recovered.ok ? "handler.recovered" : "handler.recovery_failed",
       stepId: step.id,
       stepIndex: index,
-      detail: { handler: handler.id, remedy: disposition.remedy, attempt: used + 1 },
+      detail: {
+        handler: handler.id,
+        remedy: disposition.remedy,
+        attempt: used + 1,
+        ...(recovered.ok ? {} : { reason: recovered.reason }),
+      },
     });
 
-    if (!recovered) {
+    if (!recovered.ok) {
       return {
         kind: "terminate",
         result: {
           kind: "failure",
           error: {
-            code: "APP_ERROR",
-            message: `recovery "${handler.id}" (${disposition.remedy}) did not succeed`,
+            // A refusal is a policy decision, not a flaky application. Reporting it as
+            // APP_ERROR would send the reader looking at the wrong system.
+            code: recovered.denied ? "POLICY_DENIED" : "APP_ERROR",
+            message: recovered.denied
+              ? `recovery "${handler.id}" refused: ${recovered.reason}`
+              : `recovery "${handler.id}" (${disposition.remedy}) did not succeed: ${recovered.reason}`,
             step: { id: step.id, index },
-            recoverable: true,
+            recoverable: !recovered.denied,
             attempts: used + 1,
           },
         },
@@ -647,23 +812,45 @@ function inScope(handler: Handler, stepId: string): boolean {
   return handler.scope === "global" || handler.scope.includes(stepId);
 }
 
+/**
+ * Outcome of a remedy. A policy refusal is reported distinctly from a remedy that simply did
+ * not work: "the interstitial would not dismiss" and "you are not permitted to click" need
+ * different responses from whoever reads the run.
+ */
+type RemedyOutcome =
+  | { ok: true }
+  | { ok: false; denied: true; reason: string }
+  | { ok: false; denied: false; reason: string };
+
 async function applyRemedy(
   disposition: Extract<Handler["disposition"], { kind: "recover" }>,
   context: RunContext,
-): Promise<boolean> {
+): Promise<RemedyOutcome> {
   switch (disposition.remedy) {
     case "dismiss": {
       const result = await context.surface.click(disposition.target);
-      return result.ok;
+      if (result.ok) return { ok: true };
+      return result.errorCode === "POLICY_DENIED"
+        ? { ok: false, denied: true, reason: result.error ?? "refused by policy" }
+        : { ok: false, denied: false, reason: result.error ?? "dismiss did not succeed" };
     }
     case "retry_step":
-      return true;
+      return { ok: true };
     case "reauthenticate": {
-      if (!context.options.reauthenticate) return false;
-      return context.options.reauthenticate(context.surface, {
+      if (!context.options.reauthenticate) {
+        return {
+          ok: false,
+          denied: false,
+          reason: "artifact declares a reauthenticate remedy but no provider was supplied",
+        };
+      }
+      const ok = await context.options.reauthenticate(context.surface, {
         baseUrl: context.scope.baseUrl,
         secrets: context.scope.secrets,
       });
+      return ok
+        ? { ok: true }
+        : { ok: false, denied: false, reason: "re-authentication did not succeed" };
     }
   }
 }
@@ -693,8 +880,8 @@ async function checkApproval(
 ): Promise<TerminalOutcome | undefined> {
   // Documented rule: a step without its own classification inherits the capability's.
   const risk = step.risk ?? context.capabilityRisk;
-  if (risk !== "approval_required" && risk !== "blocked") return undefined;
 
+  // "blocked" is absolute and not a policy opinion — nothing may execute it.
   if (risk === "blocked") {
     return {
       kind: "failure",
@@ -707,6 +894,9 @@ async function checkApproval(
       },
     };
   }
+
+  // Everything else is policy's call, so a tenant can widen or narrow what needs a human.
+  if (!context.guard.requiresApproval(risk)) return undefined;
 
   await context.recorder.event({
     type: "approval.required",
@@ -892,7 +1082,7 @@ function earlyFailure(code: ErrorCode, message: string): RunResult {
 
 async function captureFailureContext(context: RunContext, label: string): Promise<void> {
   try {
-    await context.recorder.screenshot(context.surface.page, `failure-${label}`);
+    await context.recorder.screenshot(context.rawSurface.page, `failure-${label}`);
     await context.recorder.failureSnapshot(await context.surface.observe(0), { label });
   } catch {
     // Evidence capture must never be the reason a run reports something other than its

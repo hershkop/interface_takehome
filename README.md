@@ -9,8 +9,8 @@ Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking de
 stand-in for the back-office systems this is really aimed at. Design rationale is in
 [PLAN.md](PLAN.md); the assignment write-up will be in `REPORT.md`.
 
-> **Status — PR 3 of 6.** The deterministic replay path runs end to end. The safety layer,
-> human handoff, and LLM discovery land in later PRs.
+> **Status — PR 4 of 6.** Deterministic replay under policy enforcement. Human handoff and
+> LLM discovery land in later PRs.
 
 ## Setup
 
@@ -100,10 +100,74 @@ npm run cli -- replay capabilities/lookup_account_balance.v1.json \
 # Rejected before a browser even launches (~0.7s)
 npm run cli -- replay capabilities/lookup_account_balance.v1.json --input accountId=oops
 #   FAILURE  INPUT_INVALID
+
+# Refused by policy: this capability types into fields, and that policy forbids it
+npm run cli -- replay capabilities/lookup_account_balance.v1.json \
+  --input accountId=12678 --policy policies/read-only.json
+#   FAILURE  POLICY_DENIED
+#     action type "fill" is blocked by policy
+#     at step 1: enter_username
 ```
 
 Exit codes let a calling agent branch without parsing output: `0` success **or** business
 outcome, `2` escalated, `1` failure. A business outcome is not an error.
+
+## Safety
+
+Every run is governed by a policy. `ReplayOptions.policy` is **required**, not optional — a
+guard that can be forgotten is not a guard, and the type checker enforces that at every call
+site. Two example policies ship in `policies/`.
+
+### Enforcement is three layers, because no one of them covers the ground
+
+**A guarded surface** wraps the browser. Every action — from the step loop, from a `dismiss`
+remedy, from a re-authentication callback, from output collection — passes through it, so an
+action type the policy blocks cannot be performed by any route. Putting the checks in the
+wrapper rather than in the replay loop is what makes them unavoidable: the loop is not the only
+thing that drives the browser.
+
+**A browser-level navigation guard** aborts document requests to origins outside the allowlist.
+This catches what a pre-action check structurally cannot: the engine is told "click this link",
+not where the link goes. A refused navigation is `POLICY_DENIED` even when the click succeeded.
+
+**A landing check after every action** compares the current URL against the allowlist. A
+single-page app routes with `history.pushState()` and issues no document request at all, so the
+network guard never sees it — a click could move from an allowed route to `/admin` and every
+later step would run there. ParaBank is server-rendered and never does this; the check exists
+because the design claim is about surfaces in general.
+
+Scope limit, stated rather than assumed: the network guard gates **document navigation only**.
+Blocking sub-resources would break pages that legitimately load styles or images from
+elsewhere. Exfiltration via XHR to an allowed-but-unexpected endpoint is not addressed.
+
+### Budgets are real, not advisory
+
+`runTimeoutMs` is enforced three ways, because checking between steps is not a ceiling: the
+guarded surface refuses actions once the deadline passes and clamps every wait to the remaining
+budget; the step loop checks between steps; and the whole run races a deadline timer, which is
+the backstop for a single operation that blocks longer than the entire budget.
+
+### The policy decides; the engine does not
+
+| Field | Effect |
+|---|---|
+| `allowedOrigins` | Exact, canonical origin match. `bank.test` never matches `bank.test.evil.com` |
+| `allowedPaths` | Glob routes. Empty means any path under an allowed origin |
+| `allowedActions` / `blockedActions` | Blocked wins over allowed, or a blocklist would be decorative |
+| `requireApprovalFor` | Which risk classes need a human. A cautious tenant can gate `safe`; a trusting one can gate nothing |
+| `maxSteps` | Checked against the artifact *before* a browser launches, and per attempt during the run |
+| `runTimeoutMs` | Wall clock for the whole run |
+| `redactPatterns` | Extends the built-in rules; never replaces them. Validated at policy load — a rule that cannot compile stops the run, because silently skipping it would fail *open* |
+
+`risk: "blocked"` is the one thing policy cannot override. Nothing executes it.
+
+The **complete** policy that governed a run is written into its `run.json` — a partial record
+cannot answer "why was this allowed?", which is the only question the record exists to answer.
+
+Inputs declared `sensitive: true` are masked by **name** in that record, not by matching their
+value. Literal scrubbing alone is not enough: the redactor deliberately ignores literals shorter
+than three characters (scrubbing every `42` out of a log destroys it), and a PIN is exactly that
+short. An explicit declaration deserves a mechanism that does not depend on the value's length.
 
 ### What makes replay deterministic
 

@@ -483,8 +483,32 @@ export const Policy = z.object({
   requireApprovalFor: z.array(RiskClass).default(["approval_required"]),
   maxSteps: z.number().int().positive().default(40),
   runTimeoutMs: z.number().int().positive().default(300_000),
-  /** Extra regexes scrubbed from logs and evidence, on top of the built-ins. */
-  redactPatterns: z.array(z.string()).default([]),
+  /**
+   * Extra regexes scrubbed from logs and evidence, on top of the built-ins.
+   *
+   * Validated here, at policy load, rather than where redaction happens. A malformed pattern
+   * that is merely skipped at runtime fails OPEN: the tenant believes a value is being scrubbed
+   * and it is written verbatim instead. A redaction rule that cannot compile has to stop the
+   * run, not be quietly ignored.
+   */
+  redactPatterns: z
+    .array(z.string())
+    .default([])
+    .superRefine((patterns, ctx) => {
+      for (const [index, pattern] of patterns.entries()) {
+        try {
+          new RegExp(pattern);
+        } catch (err) {
+          ctx.addIssue({
+            code: "custom",
+            message: `redactPattern[${index}] is not a valid regular expression: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+            path: [index],
+          });
+        }
+      }
+    }),
 });
 export type Policy = z.infer<typeof Policy>;
 

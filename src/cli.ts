@@ -5,8 +5,8 @@
  *   npm run cli -- replay <artifact> --input k=v [--headed] [--trace] [--json]
  */
 import { readFile } from "node:fs/promises";
-import { config } from "./config.js";
-import { CapabilityArtifact, type RunResult } from "./schema.js";
+import { config, defaultPolicy } from "./config.js";
+import { CapabilityArtifact, Policy, type RunResult } from "./schema.js";
 import { replay } from "./replay.js";
 import { loginToParabank } from "./parabank.js";
 
@@ -18,12 +18,14 @@ interface ParsedArgs {
   trace: boolean;
   json: boolean;
   baseUrl: string | undefined;
+  policyPath: string | undefined;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
   const inputs: Record<string, string> = {};
   let artifactPath: string | undefined;
   let baseUrl: string | undefined;
+  let policyPath: string | undefined;
 
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -33,6 +35,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       if (eq > 0) inputs[pair.slice(0, eq)] = pair.slice(eq + 1);
     } else if (arg === "--base-url") {
       baseUrl = argv[++i];
+    } else if (arg === "--policy") {
+      policyPath = argv[++i];
     } else if (!arg.startsWith("-") && artifactPath === undefined) {
       artifactPath = arg;
     }
@@ -46,6 +50,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     trace: argv.includes("--trace"),
     json: argv.includes("--json"),
     baseUrl,
+    policyPath,
   };
 }
 
@@ -57,6 +62,7 @@ Usage:
 Options:
   --input k=v     Invocation input. Repeatable.
   --base-url URL  Override the artifact's recorded baseUrl (the per-tenant resolution point).
+  --policy FILE   Policy JSON. Defaults to the ParaBank policy in src/config.ts.
   --headed        Show the browser.
   --trace         Write a raw Playwright trace. UNREDACTED — see README.
   --json          Print the RunResult as JSON and nothing else.
@@ -97,8 +103,25 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // A run always has a policy. The default is narrow — one origin, /parabank/** only — and a
+  // tenant would supply its own here rather than the engine inventing permissive defaults.
+  const policy = args.policyPath
+    ? Policy.parse(JSON.parse(await readFile(args.policyPath, "utf8")))
+    : defaultPolicy();
+
+  if (!args.baseUrl) {
+    // Nothing to reconcile: the artifact's own baseUrl is used and the policy governs it.
+  } else {
+    const decision = new (await import("./safety.js")).PolicyGuard(policy).checkUrl(args.baseUrl);
+    if (!decision.allowed) {
+      process.stderr.write(`--base-url refused by policy: ${decision.reason}\n`);
+      process.exit(1);
+    }
+  }
+
   const result = await replay({
     artifact: raw,
+    policy,
     inputs: args.inputs,
     secrets: {
       parabankUsername: config.parabank.username,

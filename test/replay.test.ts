@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { replay } from "../src/replay.js";
+import { Policy } from "../src/schema.js";
 
 /**
  * These run against local fixture pages rather than ParaBank, so the classification rules are
@@ -13,7 +14,42 @@ import { replay } from "../src/replay.js";
 
 let dir: string;
 let base: string;
+let origin: string;
 let evidenceRoot: string;
+let server: Server;
+
+/**
+ * Fixtures are served over HTTP rather than file://, because the policy allowlist only accepts
+ * http(s) origins — deliberately, since an origin allowlist that accepted file: or data: would
+ * not be a safety boundary. Serving them makes the tests exercise the same path production does.
+ */
+function startFixtureServer(root: string): Promise<{ server: Server; origin: string }> {
+  return new Promise((resolve) => {
+    const s = createServer((req, res) => {
+      const name = (req.url ?? "/").split("?")[0]!.replace(/^\//, "") || "index.html";
+      readFile(join(root, name), "utf8").then(
+        (body) => {
+          res.writeHead(200, { "content-type": "text/html" });
+          res.end(body);
+        },
+        () => {
+          res.writeHead(404, { "content-type": "text/html" });
+          res.end("<h1>not found</h1>");
+        },
+      );
+    });
+    s.listen(0, "127.0.0.1", () => {
+      const address = s.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ server: s, origin: `http://127.0.0.1:${port}` });
+    });
+  });
+}
+
+/** Permissive by default; individual tests tighten it to prove enforcement. */
+function testPolicy(over: Record<string, unknown> = {}) {
+  return Policy.parse({ allowedOrigins: [origin], ...over });
+}
 
 async function fixture(name: string, body: string): Promise<void> {
   await writeFile(join(dir, name), `<!doctype html><title>Fixture</title>${body}`, "utf8");
@@ -22,12 +58,34 @@ async function fixture(name: string, body: string): Promise<void> {
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "replay-fixtures-"));
   evidenceRoot = await mkdtemp(join(tmpdir(), "replay-evidence-"));
-  base = pathToFileURL(dir).href;
+  const started = await startFixtureServer(dir);
+  server = started.server;
+  origin = started.origin;
+  base = origin;
 
   await fixture("detail.html", `<h1>Account Details</h1><span id="balance">-$100.00</span><span id="type">SAVINGS</span>`);
   await fixture("notfound.html", `<h1>Error!</h1><p>Could not find account # 99999</p>`);
   await fixture("ambiguous.html", `<button>Go</button><button>Go</button>`);
   await fixture("empty.html", `<p>nothing to see</p>`);
+  await fixture("spa-route.html", `
+    <h1>Account Details</h1>
+    <span id="balance">-$100.00</span>
+    <button id="goadmin">Admin</button>
+    <script>
+      // A client-side router: no document request, so a network-level guard never sees it.
+      document.getElementById('goadmin').addEventListener('click', () => {
+        history.pushState({}, '', '/admin/console');
+      });
+    </script>`);
+  await fixture("slow-page.html", `
+    <h1>Loading</h1>
+    <script>
+      // Never settles, so any wait on it burns the full budget.
+    </script>`);
+  await fixture("offsite-link.html", `
+    <h1>Account Details</h1>
+    <span id="balance">-$100.00</span>
+    <a id="leave" href="https://example.com/">Continue to partner site</a>`);
   await fixture("slow-confirm.html", `
     <h1>Transfer</h1>
     <button id="submit">Submit Transfer</button>
@@ -91,6 +149,7 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   await rm(dir, { recursive: true, force: true });
   await rm(evidenceRoot, { recursive: true, force: true });
 });
@@ -147,7 +206,7 @@ function artifact(over: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 const run = (over: Record<string, unknown>, inputs: Record<string, unknown>) =>
-  replay({ artifact: artifact(over), inputs, baseUrl: base, evidenceRoot });
+  replay({ artifact: artifact(over), inputs, baseUrl: base, evidenceRoot, policy: testPolicy() });
 
 describe("replay — the four statuses", () => {
   it("returns success with coerced typed outputs", async () => {
@@ -394,6 +453,7 @@ describe("replay — validation before the browser opens", () => {
       inputs: { page: "../etc/passwd" },
       baseUrl: base,
       evidenceRoot,
+      policy: testPolicy(),
     });
     expect(result.status).toBe("failure");
     if (result.status === "failure") expect(result.error.code).toBe("INPUT_INVALID");
@@ -406,13 +466,14 @@ describe("replay — validation before the browser opens", () => {
       inputs: { page: "detail.html", accountID: "12678" },
       baseUrl: base,
       evidenceRoot,
+      policy: testPolicy(),
     });
     expect(result.status).toBe("failure");
     if (result.status === "failure") expect(result.error.message).toContain("unknown input");
   });
 
   it("rejects a malformed artifact distinctly from a bad invocation", async () => {
-    const result = await replay({ artifact: { schemaVersion: "1.0" }, inputs: {}, evidenceRoot });
+    const result = await replay({ artifact: { schemaVersion: "1.0" }, inputs: {}, evidenceRoot, policy: testPolicy() });
     expect(result.status).toBe("failure");
     if (result.status === "failure") expect(result.error.code).toBe("ARTIFACT_INVALID");
   });
@@ -431,6 +492,7 @@ describe("replay — validation before the browser opens", () => {
       inputs: { page: "detail.html" },
       baseUrl: base,
       evidenceRoot,
+      policy: testPolicy(),
     });
     expect(result.status).toBe("failure");
     if (result.status === "failure") expect(result.error.message).toContain("apiToken");
@@ -556,6 +618,7 @@ describe("inputs declared sensitive are redacted (review #2)", () => {
       inputs: { page: "detail.html", ssn: secretAccount },
       baseUrl: base,
       evidenceRoot,
+      policy: testPolicy(),
     });
     expect(result.status).toBe("success");
 
@@ -612,6 +675,7 @@ describe("a successful action is never repeated for its postcondition (review #3
       inputs: { page: "never-confirms.html" },
       baseUrl: base,
       evidenceRoot,
+      policy: testPolicy(),
       postconditionTimeoutMs: 800,
     });
 
@@ -645,6 +709,7 @@ describe("a successful action is never repeated for its postcondition (review #3
       inputs: { page: "empty.html" },
       baseUrl: base,
       evidenceRoot,
+      policy: testPolicy(),
       postconditionTimeoutMs: 300,
     });
     expect(result.status).toBe("failure");
@@ -663,6 +728,7 @@ describe("lifecycle (review #5, #6)", () => {
       inputs: { page: "detail.html" },
       baseUrl: base,
       evidenceRoot,
+      policy: testPolicy(),
       trace: "unredacted",
     });
     expect(result.status).toBe("success");
@@ -680,6 +746,7 @@ describe("lifecycle (review #5, #6)", () => {
       inputs: { page: "detail.html" },
       baseUrl: base,
       evidenceRoot,
+      policy: testPolicy(),
       // No Chromium build exists at this path, so launch throws inside the guarded lifecycle.
       executablePath: "/nonexistent/chromium-binary",
     });
@@ -724,6 +791,7 @@ describe("reauthentication stays on the invocation's tenant (review #4)", () => 
       baseUrl: base,
       secrets: { parabankUsername: "tenant-b-user", parabankPassword: "tenant-b-pass" },
       evidenceRoot,
+      policy: testPolicy(),
       reauthenticate: async (_surface, context) => {
         seen.push({ baseUrl: context.baseUrl, secrets: context.secrets });
         return true;
@@ -733,5 +801,422 @@ describe("reauthentication stays on the invocation's tenant (review #4)", () => 
     expect(seen).toHaveLength(1);
     expect(seen[0]?.baseUrl).toBe(base);
     expect(seen[0]?.secrets.parabankUsername).toBe("tenant-b-user");
+  }, 60_000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR4: policy enforcement, end to end through a real browser.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("policy enforcement", () => {
+  it("refuses a navigate whose resolved destination is off the allowlist", async () => {
+    const result = await replay({
+      artifact: artifact({ outputs: {} }),
+      inputs: { page: "detail.html" },
+      baseUrl: "http://127.0.0.1:1/",
+      evidenceRoot,
+      policy: testPolicy(),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("POLICY_DENIED");
+      expect(result.error.message).toContain("not in the allowlist");
+    }
+  }, 60_000);
+
+  it("refuses a route outside the allowed paths", async () => {
+    const result = await replay({
+      artifact: artifact({ outputs: {} }),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ allowedPaths: ["/allowed/**"] }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("POLICY_DENIED");
+      expect(result.error.message).toContain("does not match any allowed route");
+    }
+  }, 60_000);
+
+  it("refuses an action type the policy blocks", async () => {
+    const result = await replay({
+      artifact: artifact(),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ blockedActions: ["extract"] }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("POLICY_DENIED");
+      expect(result.error.step?.id).toBe("read");
+    }
+  }, 60_000);
+
+  it("blocks a click that would leave the allowlist, in the browser", async () => {
+    // The advisory layer structurally cannot catch this: the engine is told "click a link", not
+    // where the link goes. Only the browser-level guard can refuse it, and it must be treated
+    // as a denial even though the click itself succeeded.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        checkpoint: { kind: "text", value: "Account Details" },
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "leave",
+            action: { action: "click", target: { candidates: [{ strategy: "css", value: "#leave" }] } },
+          },
+        ],
+        handlers: [],
+      }),
+      inputs: { page: "offsite-link.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy(),
+    });
+
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("POLICY_DENIED");
+      expect(result.error.message).toContain("example.com");
+    }
+
+    const events = await readFile(join(result.evidence.directory, "events.jsonl"), "utf8");
+    expect(events).toContain("policy.navigation_blocked");
+  }, 60_000);
+
+  it("refuses an artifact longer than the step ceiling before launching a browser", async () => {
+    const started = Date.now();
+    const result = await replay({
+      artifact: artifact(),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ maxSteps: 1 }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("POLICY_DENIED");
+      expect(result.error.message).toContain("steps but policy allows");
+    }
+    // No browser was launched, so this is fast.
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  it("applies policy redact patterns on top of the built-in rules", async () => {
+    // A tenant adding its own identifier format must not lose SSN or API-key scrubbing.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        inputs: { page: { type: "string" }, ref: { type: "string" } },
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          { id: "check", action: { action: "assert", condition: { kind: "text", value: "Account Details" } } },
+        ],
+        handlers: [],
+      }),
+      inputs: { page: "detail.html", ref: "CUST-4815162342" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ redactPatterns: ["CUST-\\d+"] }),
+    });
+    expect(result.status).toBe("success");
+
+    const header = await readFile(join(result.evidence.directory, "run.json"), "utf8");
+    expect(header).not.toContain("CUST-4815162342");
+    expect(header).toContain("[REDACTED]");
+  }, 60_000);
+
+  it("records the policy that governed the run", async () => {
+    // Evidence has to say what the rules were, or a later reader cannot tell whether a denial
+    // was correct.
+    const result = await run({}, { page: "detail.html" });
+    const header = JSON.parse(await readFile(join(result.evidence.directory, "run.json"), "utf8"));
+    expect(header.policy.allowedOrigins).toEqual([origin]);
+  }, 60_000);
+});
+
+describe("policy decides what needs a human (PR4)", () => {
+  it("gates a safe step when the tenant's policy is cautious", async () => {
+    const result = await replay({
+      artifact: artifact({ outputs: {} }),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ requireApprovalFor: ["safe", "approval_required"] }),
+    });
+    expect(result.status).toBe("escalated");
+  }, 60_000);
+
+  it("lets a permissive policy run an approval_required capability unattended", async () => {
+    // The same artifact that escalates under the default policy completes under this one.
+    // Hardcoding "approval_required" in the engine would have made the field decorative.
+    const risky = {
+      metadata: {
+        name: "Risky",
+        description: "Capability-level risk",
+        status: "approved",
+        risk: "approval_required",
+        recordedAt: "2026-09-24T00:00:00.000Z",
+        recordedBy: "human",
+      },
+    };
+    const escalated = await replay({
+      artifact: artifact({ ...risky, outputs: {} }),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy(),
+    });
+    expect(escalated.status).toBe("escalated");
+
+    const permitted = await replay({
+      artifact: artifact(risky),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ requireApprovalFor: [] }),
+    });
+    expect(permitted.status).toBe("success");
+  }, 60_000);
+
+  it("never executes a blocked capability, whatever the policy says", async () => {
+    // "blocked" is absolute. A policy cannot opt into running it.
+    const result = await replay({
+      artifact: artifact({
+        metadata: {
+          name: "Blocked",
+          description: "Never runs",
+          status: "approved",
+          risk: "blocked",
+          recordedAt: "2026-09-24T00:00:00.000Z",
+          recordedBy: "human",
+        },
+        outputs: {},
+      }),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ requireApprovalFor: [] }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") expect(result.error.code).toBe("POLICY_DENIED");
+  }, 60_000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regressions from PR4 review.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("policy applies to everything that drives the browser (review #1, #2)", () => {
+  it("refuses a dismiss remedy that clicks when clicking is blocked", async () => {
+    // Recovery ran before the loop's policy checks and clicked the surface directly, so a
+    // read-only policy still performed clicks during recovery.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        handlers: [
+          {
+            id: "dismiss_notice",
+            match: { kind: "text", value: "Session notice" },
+            scope: "global",
+            disposition: {
+              kind: "recover",
+              remedy: "dismiss",
+              target: { candidates: [{ strategy: "css", value: "#ok" }] },
+              maxAttempts: 2,
+            },
+          },
+        ],
+      }),
+      inputs: { page: "dialog.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ blockedActions: ["click"] }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("POLICY_DENIED");
+      expect(result.error.message).toContain("click");
+    }
+  }, 60_000);
+
+  it("gives the re-authentication callback a guarded surface", async () => {
+    // A login routine navigates, types and clicks. None of it went through a check.
+    const attempted: string[] = [];
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        handlers: [
+          {
+            id: "session_expired",
+            match: { kind: "text", value: "Could not find account" },
+            scope: "global",
+            disposition: { kind: "recover", remedy: "reauthenticate", maxAttempts: 1 },
+          },
+        ],
+      }),
+      inputs: { page: "notfound.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ blockedActions: ["fill"] }),
+      reauthenticate: async (surface) => {
+        const outcome = await surface.fill(
+          { candidates: [{ strategy: "css", value: "#nothing" }] },
+          "secret",
+        );
+        attempted.push(outcome.errorCode ?? "allowed");
+        return outcome.ok;
+      },
+    });
+    // The callback's fill was refused by policy rather than executed.
+    expect(attempted).toEqual(["POLICY_DENIED"]);
+    expect(result.status).toBe("failure");
+  }, 60_000);
+
+  it("refuses a locator-backed output when extract is blocked", async () => {
+    // collectOutputs called the surface directly, so declaring a locator output read data that
+    // an extract step was forbidden from reading.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {
+          balance: {
+            type: "number",
+            source: {
+              kind: "locator",
+              target: { candidates: [{ strategy: "css", value: "#balance" }] },
+            },
+            coerce: "currency",
+          },
+        },
+        steps: [{ id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } }],
+        handlers: [],
+      }),
+      inputs: { page: "detail.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ blockedActions: ["extract"] }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") expect(result.error.code).toBe("TARGET_NOT_FOUND");
+  }, 60_000);
+});
+
+describe("client-side routing cannot escape the allowlist (review #4)", () => {
+  it("detects a pushState route change that issues no document request", async () => {
+    // The network guard only sees document requests. A single-page app routes without one, so
+    // a click could move to /admin and every later step would run there.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        checkpoint: { kind: "text", value: "Account Details" },
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "route",
+            action: { action: "click", target: { candidates: [{ strategy: "css", value: "#goadmin" }] } },
+          },
+        ],
+        handlers: [],
+      }),
+      inputs: { page: "spa-route.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ allowedPaths: ["/spa-route.html", "/detail.html"] }),
+    });
+    expect(result.status).toBe("failure");
+    if (result.status === "failure") {
+      expect(result.error.code).toBe("POLICY_DENIED");
+      expect(result.error.message).toContain("/admin/console");
+    }
+  }, 60_000);
+});
+
+describe("runTimeoutMs is a real ceiling (review #3)", () => {
+  it("stops a single operation that would outlast the whole budget", async () => {
+    // Checking the deadline only between steps let one long wait overrun by any amount.
+    const started = Date.now();
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        checkpoint: { kind: "text", value: "never" },
+        steps: [
+          { id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } },
+          {
+            id: "wait_forever",
+            action: {
+              action: "wait",
+              condition: { kind: "text", value: "never appears" },
+              timeoutMs: 60_000,
+            },
+          },
+        ],
+        handlers: [],
+      }),
+      inputs: { page: "slow-page.html" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy({ runTimeoutMs: 2_000 }),
+    });
+
+    const elapsed = Date.now() - started;
+    expect(result.status).toBe("failure");
+    // The step asked for 60s; the policy allowed 2s.
+    expect(elapsed).toBeLessThan(25_000);
+  }, 60_000);
+});
+
+describe("redaction rules cannot fail open (review #5, #6)", () => {
+  it("rejects a policy whose redaction pattern does not compile", () => {
+    // Skipping a malformed rule fails OPEN: the tenant believes a value is scrubbed and it is
+    // written verbatim. A redaction rule that cannot compile must stop the run.
+    const parsed = Policy.safeParse({
+      allowedOrigins: ["http://a.test"],
+      redactPatterns: ["([unclosed"],
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("masks a sensitive input too short for literal scrubbing", async () => {
+    // The redactor ignores literals under three characters, deliberately. A PIN declared
+    // sensitive is exactly that short and was written verbatim.
+    const result = await replay({
+      artifact: artifact({
+        outputs: {},
+        inputs: { page: { type: "string" }, pin: { type: "string", sensitive: true } },
+        steps: [{ id: "open", action: { action: "navigate", url: "{{baseUrl}}/{{inputs.page}}" } }],
+        handlers: [],
+        checkpoint: { kind: "text", value: "Account Details" },
+      }),
+      inputs: { page: "detail.html", pin: "42" },
+      baseUrl: base,
+      evidenceRoot,
+      policy: testPolicy(),
+    });
+
+    const header = JSON.parse(await readFile(join(result.evidence.directory, "run.json"), "utf8"));
+    expect(header.inputs.pin).toBe("[REDACTED]");
+    expect(header.inputs.page).toBe("detail.html");
+  }, 60_000);
+});
+
+describe("evidence records the whole policy (review #7)", () => {
+  it("persists every field a reader would need to judge a decision", async () => {
+    const result = await run({}, { page: "detail.html" });
+    const header = JSON.parse(await readFile(join(result.evidence.directory, "run.json"), "utf8"));
+    for (const field of [
+      "allowedOrigins",
+      "allowedPaths",
+      "allowedActions",
+      "blockedActions",
+      "requireApprovalFor",
+      "maxSteps",
+      "runTimeoutMs",
+      "redactPatterns",
+    ]) {
+      expect(header.policy, field).toHaveProperty(field);
+    }
   }, 60_000);
 });
