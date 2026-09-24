@@ -4,6 +4,10 @@ node_modules/
 review-*/
 dist/
 .env
+.env.*
+.env~
+*.env.bak
+!.env.example
 *.log
 
 # Assignment brief — not ours to redistribute

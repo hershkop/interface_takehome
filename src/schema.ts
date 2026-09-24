@@ -20,11 +20,20 @@ export const TextCondition = z.object({
   visible: z.boolean().default(true),
 });
 
+/**
+ * Note the absence of a `visible` flag, unlike TextCondition.
+ *
+ * Role matching resolves against the accessibility tree, and elements hidden with `display:none`,
+ * `visibility:hidden`, or `aria-hidden` are not in that tree at all. A `visible: false` here
+ * could not do anything — it would be a field that silently never worked. Leaving it out makes
+ * the meaningless combination unrepresentable instead of merely ineffective.
+ *
+ * If you need to assert on hidden content, match its text.
+ */
 export const RoleCondition = z.object({
   kind: z.literal("role"),
   role: z.string().min(1),
   name: z.string().optional(),
-  visible: z.boolean().default(true),
 });
 
 export const UrlCondition = z.object({

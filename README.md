@@ -9,8 +9,8 @@ Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking de
 stand-in for the back-office systems this is really aimed at. Design rationale is in
 [PLAN.md](PLAN.md); the assignment write-up will be in `REPORT.md`.
 
-> **Status — PR 1 of 6.** Scaffolding, target verification, and the typed contracts. The surface,
-> replay engine, safety layer, handoff, and LLM discovery land in later PRs.
+> **Status — PR 2 of 6.** Contracts, the surface abstraction, locator resolution, and evidence.
+> The replay engine, safety layer, handoff, and LLM discovery land in later PRs.
 
 ## Setup
 
@@ -60,21 +60,54 @@ docker compose up -d --force-recreate
 
 ```bash
 npm run setup       # reset + verify the target
-npm test            # unit tests
+npm run probe       # drive the real app through the surface; writes evidence/
+npm run probe -- --headed   # ...and watch it
+npm test            # unit + browser tests
 npm run typecheck   # tsc --noEmit
 ```
 
-The `discover` / `replay` / `capabilities` CLI arrives with the engine in PRs 2–6.
+`npm run probe` is a development harness, not the product CLI — `discover` and `replay` arrive
+with the engine. It exists so this layer can be exercised against the real application rather
+than only against synthetic pages, and so you can look at a real evidence directory:
+
+```
+evidence/probe-<timestamp>/
+├── run.json            run metadata
+├── events.jsonl        redacted structured events
+├── result.json         the four-status RunResult
+├── 001-overview.png    screenshots, sequence-numbered
+└── trace.zip           Playwright trace
+```
+
+The `discover` / `replay` / `capabilities` CLI arrives in PRs 3–6.
 
 ## What's here now
 
 ```
-src/schema.ts   every typed contract: conditions, locators, actions, the capability
-                artifact, handlers, policy, observations, interventions, run results
-src/config.ts   env + default policy
-scripts/setup.ts  target reset and verification
+src/schema.ts    every typed contract: conditions, locators, actions, the capability
+                 artifact, handlers, policy, observations, interventions, run results
+src/surface.ts   the Surface port + PlaywrightSurface + condition evaluation
+src/locator.ts   candidate list -> exactly one visible element, or a refusal
+src/evidence.ts  JSONL events, screenshots, trace, result.json, model-call counter
+src/redact.ts    one redactor, applied at the sink
+src/config.ts    env + default policy
+scripts/setup.ts target reset and verification
+scripts/probe.ts development harness for the surface layer
 docs/DAY0-FINDINGS.md   what probing ParaBank actually turned up, and what it changed
 ```
+
+### The surface seam
+
+Nothing above `src/surface.ts` mentions Playwright, CSS, or a browser. Artifacts and replay
+speak in intent — *click the control whose accessible name is "Transfer"*, *is this text
+visible* — and `Surface` has seven methods. A desktop adapter would implement the same seven
+against OS accessibility APIs, and no artifact would change.
+
+That is also why observation is a Playwright **ARIA snapshot** rather than a DOM dump: role and
+accessible name is the one representation a modern web app, a legacy frameset, and a native
+desktop app can all produce. It is visibility-aware by construction, far smaller than the DOM,
+and it names controls the same way the recorded locators do — so a model reading it naturally
+proposes role+name targeting instead of brittle CSS.
 
 ### Three schema decisions worth knowing up front
 
