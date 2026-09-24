@@ -62,6 +62,8 @@ export interface Surface {
   clickAt(x: number, y: number): Promise<CoordinateClickOutcome>;
   verify(condition: Condition): Promise<boolean>;
   currentUrl(): string;
+  /** URLs the navigation guard refused since this was last called. */
+  takeBlockedNavigations(): string[];
   /** Returns the trace path when tracing was enabled, so the caller can record it. */
   close(): Promise<string | undefined>;
 }
@@ -194,6 +196,15 @@ export interface PlaywrightSurfaceOptions {
   defaultTimeoutMs?: number;
   /** Point at a specific Chromium build (a system browser, or a pinned one in CI). */
   executablePath?: string;
+  /**
+   * Gate on document navigation, enforced in the browser rather than checked afterwards.
+   *
+   * Returning false aborts the request, so the page never loads. This is the only layer that
+   * can stop a navigation the engine did not initiate — a click on an off-site link, a
+   * server-side redirect, a meta refresh — because by the time the engine could inspect the
+   * URL, the browser would already have fetched it.
+   */
+  navigationAllowed?: (url: string) => boolean;
 }
 
 export class PlaywrightSurface implements Surface {
@@ -203,7 +214,14 @@ export class PlaywrightSurface implements Surface {
     readonly page: Page,
     private readonly traceDir: string | undefined,
     private readonly defaultTimeoutMs: number,
+    /** Navigations the browser-level guard refused. Surfaced so a failure can name them. */
+    private readonly blockedNavigations: string[],
   ) {}
+
+  /** URLs the navigation guard aborted during this session. */
+  takeBlockedNavigations(): string[] {
+    return this.blockedNavigations.splice(0, this.blockedNavigations.length);
+  }
 
   static async launch(options: PlaywrightSurfaceOptions = {}): Promise<PlaywrightSurface> {
     const browser = await chromium.launch({
@@ -211,6 +229,20 @@ export class PlaywrightSurface implements Surface {
       ...(options.executablePath ? { executablePath: options.executablePath } : {}),
     });
     const context = await browser.newContext();
+    const blockedNavigations: string[] = [];
+    if (options.navigationAllowed) {
+      const allowed = options.navigationAllowed;
+      await context.route("**/*", async (route, request) => {
+        // Only document navigations are gated. Blocking sub-resources would break pages that
+        // legitimately load styles or images from elsewhere, and the threat being addressed is
+        // the session going somewhere it should not — not a stylesheet.
+        if (request.resourceType() !== "document") return route.continue();
+        if (allowed(request.url())) return route.continue();
+        blockedNavigations.push(request.url());
+        return route.abort("blockedbyclient");
+      });
+    }
+
     const tracing = options.trace === "unredacted" && Boolean(options.traceDir);
     if (tracing) {
       await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
@@ -218,7 +250,14 @@ export class PlaywrightSurface implements Surface {
     const page = await context.newPage();
     const timeout = options.defaultTimeoutMs ?? 10_000;
     page.setDefaultTimeout(timeout);
-    return new PlaywrightSurface(browser, context, page, tracing ? options.traceDir : undefined, timeout);
+    return new PlaywrightSurface(
+      browser,
+      context,
+      page,
+      tracing ? options.traceDir : undefined,
+      timeout,
+      blockedNavigations,
+    );
   }
 
   /**

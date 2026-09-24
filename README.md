@@ -9,8 +9,8 @@ Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking de
 stand-in for the back-office systems this is really aimed at. Design rationale is in
 [PLAN.md](PLAN.md); the assignment write-up will be in `REPORT.md`.
 
-> **Status — PR 3 of 6.** The deterministic replay path runs end to end. The safety layer,
-> human handoff, and LLM discovery land in later PRs.
+> **Status — PR 4 of 6.** Deterministic replay under policy enforcement. Human handoff and
+> LLM discovery land in later PRs.
 
 ## Setup
 
@@ -100,10 +100,56 @@ npm run cli -- replay capabilities/lookup_account_balance.v1.json \
 # Rejected before a browser even launches (~0.7s)
 npm run cli -- replay capabilities/lookup_account_balance.v1.json --input accountId=oops
 #   FAILURE  INPUT_INVALID
+
+# Refused by policy: this capability types into fields, and that policy forbids it
+npm run cli -- replay capabilities/lookup_account_balance.v1.json \
+  --input accountId=12678 --policy policies/read-only.json
+#   FAILURE  POLICY_DENIED
+#     action type "fill" is blocked by policy
+#     at step 1: enter_username
 ```
 
 Exit codes let a calling agent branch without parsing output: `0` success **or** business
 outcome, `2` escalated, `1` failure. A business outcome is not an error.
+
+## Safety
+
+Every run is governed by a policy. `ReplayOptions.policy` is **required**, not optional — a
+guard that can be forgotten is not a guard, and the type checker enforces that at every call
+site. Two example policies ship in `policies/`.
+
+### Enforcement is two layers, because one is not enough
+
+**Advisory checks** run before each action: origin and route allowlists, permitted action
+types, a step ceiling, and a wall-clock ceiling. They are precise and produce good errors — but
+they only see what the engine is *about* to do.
+
+**A browser-level navigation guard** aborts document requests to origins outside the allowlist.
+This catches what the advisory layer structurally cannot: the engine is told "click this link",
+not where the link goes. A server-side redirect, a meta refresh, or an off-site link would
+otherwise be noticed only *after* the browser had already been there. A navigation the guard
+refused is reported as `POLICY_DENIED` even when the click itself succeeded.
+
+Scope limit, stated rather than assumed: the guard gates **document navigation only**. Blocking
+sub-resources would break pages that legitimately load styles or images from elsewhere.
+Exfiltration via XHR to an allowed-but-unexpected endpoint is not addressed here.
+
+### The policy decides; the engine does not
+
+| Field | Effect |
+|---|---|
+| `allowedOrigins` | Exact, canonical origin match. `bank.test` never matches `bank.test.evil.com` |
+| `allowedPaths` | Glob routes. Empty means any path under an allowed origin |
+| `allowedActions` / `blockedActions` | Blocked wins over allowed, or a blocklist would be decorative |
+| `requireApprovalFor` | Which risk classes need a human. A cautious tenant can gate `safe`; a trusting one can gate nothing |
+| `maxSteps` | Checked against the artifact *before* a browser launches, and per attempt during the run |
+| `runTimeoutMs` | Wall clock for the whole run |
+| `redactPatterns` | Extends the built-in redaction rules; never replaces them |
+
+`risk: "blocked"` is the one thing policy cannot override. Nothing executes it.
+
+The policy that governed a run is written into its `run.json`, so a later reader can tell
+whether a denial was correct.
 
 ### What makes replay deterministic
 

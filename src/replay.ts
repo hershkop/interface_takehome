@@ -26,11 +26,13 @@ import {
   type ErrorCode,
   type Handler,
   type OutputDefinition,
+  type Policy,
   type RiskClass,
   type RunError,
   type RunResult,
 } from "./schema.js";
 import { EvidenceRecorder, newRunId } from "./evidence.js";
+import { PolicyGuard } from "./safety.js";
 import { createRedactor, type Redactor } from "./redact.js";
 import { PlaywrightSurface, describeCondition } from "./surface.js";
 import {
@@ -56,6 +58,11 @@ export interface ReplayOptions {
   postconditionTimeoutMs?: number;
   /** Point at a specific Chromium build. */
   executablePath?: string;
+  /**
+   * Enforced for the whole run. Omitting it is not "no policy" — the caller must supply one,
+   * because a guard that can be forgotten is not a guard.
+   */
+  policy: Policy;
   /**
    * Supplied by the handoff layer in PR5. Until then, a step that needs approval returns
    * `escalated` rather than pretending it could proceed.
@@ -91,6 +98,7 @@ interface RunContext {
   capabilityRisk: RiskClass;
   /** How long a postcondition is polled before it is treated as unmet. */
   postconditionTimeoutMs: number;
+  guard: PolicyGuard;
 }
 
 type StepDisposition =
@@ -136,7 +144,15 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
     .filter((value): value is string | number => value !== undefined && value !== null)
     .map(String);
 
+  const guard = new PolicyGuard(options.policy);
+
+  const fits = guard.checkArtifactFits(artifact.steps.length);
+  if (!fits.allowed) return earlyFailure("POLICY_DENIED", fits.reason ?? "artifact exceeds policy");
+
   const redact = createRedactor({
+    // Policy-configured patterns extend the built-ins rather than replacing them, so a tenant
+    // can add its own identifier formats without giving up API-key or SSN scrubbing.
+    patterns: options.policy.redactPatterns,
     literals: [
       ...Object.entries(secrets)
         .filter(([key]) => isSensitiveSecretKey(key))
@@ -155,6 +171,12 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
 
   const baseUrl = options.baseUrl ?? artifact.target.baseUrl;
   await recorder.writeRunHeader({
+    policy: {
+      allowedOrigins: options.policy.allowedOrigins,
+      allowedPaths: options.policy.allowedPaths,
+      blockedActions: options.policy.blockedActions,
+      maxSteps: options.policy.maxSteps,
+    },
     capabilityId: artifact.capabilityId,
     capabilityVersion: artifact.version,
     artifactStatus: artifact.metadata.status,
@@ -178,6 +200,7 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       traceDir: recorder.directory,
       defaultTimeoutMs: options.stepTimeoutMs ?? 10_000,
       ...(options.executablePath ? { executablePath: options.executablePath } : {}),
+      navigationAllowed: guard.navigationAllowed,
     });
 
     const context: RunContext = {
@@ -193,7 +216,10 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       // a capability marked approval_required executed unattended whenever its steps happened
       // not to restate the risk — which is the documented inheritance rule doing nothing.
       capabilityRisk: artifact.metadata.risk,
+      guard,
     };
+
+    guard.begin();
 
     terminal = await runSteps(artifact.steps, artifact.handlers, context);
 
@@ -301,7 +327,34 @@ async function runSteps(
       const approval = await checkApproval(step, index, context);
       if (approval) return approval;
 
+      // Budget checks are per attempt, not per step: a retrying step consumes budget, which is
+      // what stops a flapping recovery from running for an hour inside a "40 step" policy.
+      const budget = context.guard.countStep();
+      if (!budget.allowed) return policyDenied(step, index, budget.reason);
+      const deadline = context.guard.checkDeadline();
+      if (!deadline.allowed) return policyDenied(step, index, deadline.reason);
+
+      const permitted = await checkActionPolicy(step, index, context);
+      if (permitted) return permitted;
+
       const outcome = await executeStep(step, index, context);
+
+      // Anything the browser-level guard refused is a policy denial even if the action itself
+      // reported success — a click that tried to leave the allowlist "worked" as a click.
+      const blocked = context.surface.takeBlockedNavigations();
+      if (blocked.length > 0) {
+        await context.recorder.event({
+          type: "policy.navigation_blocked",
+          stepId: step.id,
+          stepIndex: index,
+          detail: { urls: blocked },
+        });
+        return policyDenied(
+          step,
+          index,
+          `navigation to ${blocked.join(", ")} was blocked by the origin allowlist`,
+        );
+      }
 
       // The after-phase needs to know whether the step actually ran, because that decides
       // whether recovery may retry it. See applyHandlers.
@@ -534,6 +587,54 @@ async function verifyPostcondition(
   };
 }
 
+
+/**
+ * Checks the resolved action against policy before it executes.
+ *
+ * The URL is resolved first so the allowlist sees the destination a template actually produces
+ * — checking `{{baseUrl}}/x` as a literal would check nothing.
+ */
+async function checkActionPolicy(
+  step: ArtifactStep,
+  index: number,
+  context: RunContext,
+): Promise<TerminalOutcome | undefined> {
+  let resolvedUrl: string | undefined;
+  if (step.action.action === "navigate") {
+    try {
+      resolvedUrl = resolveTemplate(step.action.url, context.scope);
+    } catch {
+      // An unresolved template is reported by executeStep with a better message.
+      resolvedUrl = undefined;
+    }
+  }
+
+  const decision = context.guard.checkAction(step.action, resolvedUrl);
+  if (decision.allowed) return undefined;
+
+  await context.recorder.event({
+    type: "policy.denied",
+    stepId: step.id,
+    stepIndex: index,
+    actionType: step.action.action,
+    detail: { reason: decision.reason },
+  });
+  return policyDenied(step, index, decision.reason);
+}
+
+function policyDenied(step: ArtifactStep, index: number, reason: string | undefined): TerminalOutcome {
+  return {
+    kind: "failure",
+    error: {
+      code: "POLICY_DENIED",
+      message: reason ?? "refused by policy",
+      step: { id: step.id, index },
+      recoverable: false,
+      attempts: 1,
+    },
+  };
+}
+
 // ─── Handlers ──────────────────────────────────────────────────────────────────
 
 async function applyHandlers(
@@ -693,8 +794,8 @@ async function checkApproval(
 ): Promise<TerminalOutcome | undefined> {
   // Documented rule: a step without its own classification inherits the capability's.
   const risk = step.risk ?? context.capabilityRisk;
-  if (risk !== "approval_required" && risk !== "blocked") return undefined;
 
+  // "blocked" is absolute and not a policy opinion — nothing may execute it.
   if (risk === "blocked") {
     return {
       kind: "failure",
@@ -707,6 +808,9 @@ async function checkApproval(
       },
     };
   }
+
+  // Everything else is policy's call, so a tenant can widen or narrow what needs a human.
+  if (!context.guard.requiresApproval(risk)) return undefined;
 
   await context.recorder.event({
     type: "approval.required",
