@@ -18,7 +18,7 @@ Requires Node 20+ and Docker.
 
 ```bash
 npm install
-cp .env.example .env        # optional; defaults work if port 8080 is free
+cp .env.example .env        # optional; the defaults work as-is
 docker compose up -d        # starts ParaBank
 npm run setup               # seeds it and prints the demo account IDs
 ```
@@ -39,7 +39,22 @@ reproducible:
 Seeding is the *only* thing that uses ParaBank's REST API. Every automated task goes through the
 UI, which is the whole point of the system.
 
-If port 8080 is taken, set `PARABANK_PORT` and `PARABANK_BASE_URL` in `.env`.
+ParaBank is published on **18080** by default. The container itself always listens on 8080
+internally; only the host port moved, because 8080 on a developer machine is usually already
+spoken for. To use a different one, set **both** values in `.env` (the base URL is what the
+automation actually navigates to, so changing only the port would leave it pointing at the old
+address) and re-create the container:
+
+```bash
+PARABANK_PORT=19080
+PARABANK_BASE_URL=http://localhost:19080/parabank
+```
+
+```bash
+docker compose up -d --force-recreate
+```
+
+`npm run setup` prints this reminder if it can't reach the app.
 
 ## Commands
 

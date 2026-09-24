@@ -73,7 +73,11 @@ GET /parabank/activity.htm?id=99999   → title "ParaBank | Error"
 That is the `account_not_found` handler match for `lookup_account_balance`, and it is a real
 app behavior rather than an invented string.
 
-## 5. Port
+## 5. Port — 8080 is not a usable default
 
-The container listens on 8080. Port 8080 was already taken on the probe machine, so
-`docker-compose.yml` exposes `${PARABANK_PORT:-8080}` and every default reads from config.
+The container listens on 8080 internally. On the probe machine 8080 was already held by another
+Docker container, and so were 8090 and 8888; a scan found 8081, 9000, 9090, 3000 and 18080 free.
+
+Rather than ship a default that collides on a common developer setup, the published host port is
+**18080** (`${PARABANK_PORT:-18080}`), and both the port and the base URL are configurable.
+Nothing in the code hard-codes a port — `src/config.ts` derives the default base URL from it.

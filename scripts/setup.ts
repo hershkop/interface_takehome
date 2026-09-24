@@ -11,7 +11,7 @@ import { config } from "../src/config.js";
 const { baseUrl } = config.parabank;
 
 /** Tomcat needs ~20s after the container starts; poll rather than fail on a cold start. */
-async function waitForParabank(timeoutMs = 90_000): Promise<boolean> {
+async function waitForParabank(timeoutMs = 60_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   let announced = false;
   while (Date.now() < deadline) {
@@ -37,9 +37,13 @@ async function main(): Promise<void> {
   const reachable = await waitForParabank();
   if (!reachable) {
     console.error(
-      `\nCannot reach ParaBank at ${baseUrl}\n` +
-        `Start it first:  docker compose up -d\n` +
-        `(then wait for the healthcheck: docker compose ps)\n`,
+      `\nCannot reach ParaBank at ${baseUrl}\n\n` +
+        `  1. Is it running?      docker compose up -d && docker compose ps\n` +
+        `  2. Port already taken? Currently configured: ${config.parabank.port} (default 18080).\n` +
+        `     If something else holds it, pick another and put BOTH in .env:\n` +
+        `       PARABANK_PORT=19080\n` +
+        `       PARABANK_BASE_URL=http://localhost:19080/parabank\n` +
+        `     then: docker compose up -d --force-recreate\n`,
     );
     process.exit(1);
   }

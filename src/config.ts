@@ -1,7 +1,9 @@
 import "dotenv/config";
 import { Policy } from "./schema.js";
 
-const PORT = process.env.PARABANK_PORT ?? "8080";
+/** 18080, not 8080: the container only ever listens on 8080 internally, and 8080 on a
+ *  developer machine is already spoken for more often than not. */
+const PORT = process.env.PARABANK_PORT ?? "18080";
 
 export const config = {
   parabank: {
