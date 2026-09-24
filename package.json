@@ -1,0 +1,24 @@
+{
+  "name": "computer-use-automation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Record an LLM-driven UI run as a typed capability artifact; replay it deterministically.",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "setup": "tsx scripts/setup.ts",
+    "cli": "tsx src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
