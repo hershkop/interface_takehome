@@ -128,6 +128,12 @@ export async function evaluateCondition(page: Page, condition: Condition): Promi
       }
       return true;
     }
+    case "any": {
+      for (const c of condition.conditions) {
+        if (await evaluateCondition(page, c)) return true;
+      }
+      return false;
+    }
     case "not":
       return !(await evaluateCondition(page, condition.condition));
   }
@@ -154,6 +160,8 @@ export function describeCondition(condition: Condition): string {
       return `title containing ${JSON.stringify(condition.value)}`;
     case "all":
       return condition.conditions.map(describeCondition).join(" AND ");
+    case "any":
+      return `(${condition.conditions.map(describeCondition).join(" OR ")})`;
     case "not":
       return `NOT (${describeCondition(condition.condition)})`;
   }

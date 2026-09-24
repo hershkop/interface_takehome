@@ -9,8 +9,8 @@ Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking de
 stand-in for the back-office systems this is really aimed at. Design rationale is in
 [PLAN.md](PLAN.md); the assignment write-up will be in `REPORT.md`.
 
-> **Status — PR 2 of 6.** Contracts, the surface abstraction, locator resolution, and evidence.
-> The replay engine, safety layer, handoff, and LLM discovery land in later PRs.
+> **Status — PR 3 of 6.** The deterministic replay path runs end to end. The safety layer,
+> human handoff, and LLM discovery land in later PRs.
 
 ## Setup
 
@@ -66,11 +66,63 @@ docker compose up -d --force-recreate
 
 ```bash
 npm run setup       # reset + verify the target
-npm run probe       # drive the real app through the surface; writes evidence/
-npm run probe -- --headed   # ...and watch it
 npm test            # unit + browser tests
 npm run typecheck   # tsc --noEmit
+npm run probe       # surface-layer harness (development aid, not the product CLI)
 ```
+
+## Demo — replay a capability
+
+```bash
+docker compose up -d && npm run setup
+
+npm run cli -- validate capabilities/lookup_account_balance.v1.json
+
+# Success: typed outputs, no model in the loop
+npm run cli -- replay capabilities/lookup_account_balance.v1.json --input accountId=12678
+#   SUCCESS
+#     accountId   = "12678"
+#     accountType = "SAVINGS"
+#     balance     = -100
+#     model calls : 0
+
+# Business outcome: an answer, not a failure. Exit code 0.
+npm run cli -- replay capabilities/lookup_account_balance.v1.json --input accountId=99999
+#   BUSINESS OUTCOME  account_not_found
+#     requestedAccountId = "99999"
+
+# Hard failure: names the step, what was expected, what was observed
+npm run cli -- replay capabilities/lookup_account_balance.v1.json \
+  --input accountId=12678 --base-url http://localhost:18080/parabank/nonexistent
+#   FAILURE  CHECKPOINT_FAILED
+#     postcondition failed after "open_login": role heading named "Customer Login"
+
+# Rejected before a browser even launches (~0.7s)
+npm run cli -- replay capabilities/lookup_account_balance.v1.json --input accountId=oops
+#   FAILURE  INPUT_INVALID
+```
+
+Exit codes let a calling agent branch without parsing output: `0` success **or** business
+outcome, `2` escalated, `1` failure. A business outcome is not an error.
+
+### What makes replay deterministic
+
+| | |
+|---|---|
+| **No model** | Nothing in `src/replay.ts` can call one. Every run records `modelCalls`, and the tests assert `0` on every path |
+| **Declared branches only** | Steps in order, handlers with fixed dispositions, one checkpoint. There is no runtime decision to make |
+| **Refusal over guessing** | A target must resolve to exactly one visible element. In a back-office banking app, acting on the wrong control is worse than not acting |
+| **Waits, never sleeps** | Every wait is on an observable condition with a bounded timeout |
+| **Verified, not assumed** | Postconditions prove a step did something; the final checkpoint proves the run reached the state it claims |
+
+### Recovery never re-runs completed work
+
+A recovery matched *before* a step retries it — the step hasn't run. A recovery matched *after*
+a step that **succeeded** continues to the next step instead.
+
+That asymmetry is a safety property, not a style choice: re-running a click that already
+submitted a funds transfer submits a second one. `test/replay.test.ts` pins it with a fixture
+that counts submissions and raises an interstitial only after a successful submit.
 
 `npm run probe` is a development harness, not the product CLI — `discover` and `replay` arrive
 with the engine. It exists so this layer can be exercised against the real application rather
@@ -116,6 +168,10 @@ The `discover` / `replay` / `capabilities` CLI arrives in PRs 3–6.
 ```
 src/schema.ts    every typed contract: conditions, locators, actions, the capability
                  artifact, handlers, policy, observations, interventions, run results
+src/replay.ts    the deterministic interpreter: steps, handlers, checkpoints, outputs
+src/template.ts  {{inputs|secrets|vars|baseUrl}} resolution and output coercion
+src/cli.ts       validate | replay
+src/parabank.ts  app-specific glue (re-authentication), injected at the edge
 src/surface.ts   the Surface port + PlaywrightSurface + condition evaluation
 src/locator.ts   candidate list -> exactly one visible element, or a refusal
 src/evidence.ts  JSONL events, screenshots, trace, result.json, model-call counter
