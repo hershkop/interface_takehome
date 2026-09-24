@@ -1,723 +1,545 @@
 # Computer-Use Automation System — Implementation Plan
 
-## 1. Goal
+## 0. Guiding constraint
 
-Build a small end-to-end system that:
+Small, correct, well-argued. The brief rewards judgment and integration, not breadth:
+*"Prefer a thin-but-real version of every core requirement over a polished subset."*
 
-1. Accepts a natural-language goal for ParaBank.
-2. Uses an LLM to observe and operate the real ParaBank UI through Playwright.
-3. Records a successful discovery run as a typed, reviewable capability artifact.
-4. Replays the artifact deterministically without an LLM making decisions.
-5. Classifies successful results, expected business outcomes, and failures.
-6. Pauses and transfers the same live browser session to a human when approval or assistance is required.
-7. Produces redacted logs, screenshots, and a Playwright trace as evidence.
+So the plan is deliberately sized: **~10 source files, 3 milestones, ~5 tests, 1 stretch goal.**
+Depth goes into the three load-bearing pieces only:
 
-The implementation should remain a modular monolith. The durable artifact and replay path must not depend on the selected model provider or discovery implementation.
+1. The **capability artifact schema** — especially its outcome/handler model.
+2. **Deterministic replay** and its error taxonomy.
+3. The **control-transfer model** for human escalation.
 
-## 2. Chosen approach
+Everything else is a clean, documented seam.
+
+---
+
+## 1. The end-to-end thread
+
+```
+goal → real LLM discovery run → capability artifact → deterministic replay
+     → (typed outputs | business outcome | failure | escalation)
+     → human takes the live session → resume → evidence for all of it
+```
+
+Two capabilities carry that thread. **This is the central change from the first draft.**
+
+| Capability | Why it exists |
+|---|---|
+| `lookup_account_balance` (search → detail → extract) | **The headline.** Discovered autonomously by the LLM. Replays unattended with typed inputs and typed outputs. Has a natural business outcome: account not found. |
+| `transfer_funds` (multi-field form → confirmation) | **The risk demo.** Terminal step is `approval_required`; replay escalates and a human completes it in the same live browser. |
+
+Rationale for the split: in the first draft the only capability required a human on the happy
+path, which meant (a) the mandatory real LLM discovery run needed a person mid-flight, (b) the
+graded "deterministic replay returns outputs" demo never ran to completion unattended, and
+(c) there was no clean "no such record" business outcome — the exact distinction the brief's
+glossary calls the most common design mistake. Splitting fixes all three and costs almost
+nothing, because both capabilities run on the same engine.
+
+---
+
+## 2. Chosen stack
 
 | Concern | Choice |
 |---|---|
 | Language | TypeScript on Node.js |
-| Browser automation | Playwright |
-| Model integration | Vercel AI SDK with structured output |
+| Browser control | Playwright |
+| Model | `claude-opus-5` via `@anthropic-ai/sdk`, tool use with `strict: true` for the action schema |
 | Runtime validation | Zod |
-| Target application | ParaBank, started locally through Docker Compose |
-| Discovery observation | Minimal hybrid: screenshot plus compact interactive-element list |
-| Saved capability | Versioned, linear JSON artifact |
-| Production execution | Deterministic artifact interpreter; no LLM decisions |
-| Human handoff | CLI intervention prompt plus the same headed browser session |
-| Evidence | JSONL events, screenshots, saved artifacts, structured results, and Playwright traces |
-| Persistence | Filesystem only |
+| Target app | ParaBank, local via Docker Compose |
+| Primary observation | **Playwright ARIA snapshot** (role + accessible name tree), screenshot secondary |
+| Artifact | Versioned, linear JSON, Zod-validated |
+| Replay | Deterministic interpreter; zero model calls |
+| Handoff | Ownership lock + headed browser + CLI prompt |
+| Persistence | Filesystem |
 
-### Why this combination
+### Two decisions worth defending
 
-- ParaBank provides a banking-relevant, non-trivial UI without requiring us to write a target application.
-- Playwright provides browser control, locator APIs, persistent browser contexts, traces, screenshots, and a visible browser for human takeover.
-- The Vercel AI SDK removes model-provider plumbing while remaining isolated behind a discovery interface.
-- A linear artifact keeps replay understandable and makes success and failure behavior easy to audit.
-- Filesystem persistence is sufficient for a focused single-process demonstration.
+**ARIA snapshot as the primary observation.** `locator.ariaSnapshot()` gives the model a
+role/name tree. Three payoffs: the locators the model picks are *already* role+name (first in our
+preference order, so ref→locator derivation stops being a risk); it is cheaper and more stable
+than a DOM dump; and it is the same representation a desktop accessibility adapter exposes, so
+the Section 3.7 heterogeneity answer is a shape we already consume rather than a promise.
+Screenshot stays for evidence and for surfaces where the a11y tree is empty (framesets, canvas)
+— that caveat goes in REPORT.md.
+
+**Direct Anthropic SDK, not an AI-SDK wrapper.** Tool use gives structured output natively. The
+model sits behind `DiscoveryEngine` anyway, so an extra abstraction layer buys nothing on a
+project graded for appropriate simplicity.
+
+---
 
 ## 3. Explicit non-goals
 
-- No distributed services, job queue, database, or event broker.
-- No remote co-browsing or production operator dashboard.
-- No desktop automation implementation.
-- No open-ended LLM recovery during replay.
-- No visual embeddings, OCR pipeline, or image-matching engine.
-- No general workflow DAG, loops, or conditional branches in artifact version 1.
-- No implementation of real multi-tenant infrastructure.
-- No attempt to support every Playwright action.
+No services, queue, database, or broker. No remote co-browsing console. No desktop
+implementation. No open-ended LLM recovery during replay. No OCR or image matching. No
+branches, loops, or DAGs in artifact v1. No real multi-tenant infrastructure. Not every
+Playwright action.
 
-## 4. System shape
+---
 
-```text
-CLI
- ├── discover <goal>
- │     └── DiscoveryEngine
- │           ├── Observer
- │           ├── Vercel AI SDK
- │           └── ActionExecutor
- │                    │
- │                    ▼
- │             PlaywrightSurface
- │                    │
- │                    ▼
- │            CapabilityRecorder
- │                    │
- │                    ▼
- │          capability.v1.json
- │
- └── replay <artifact> <inputs>
-       └── ReplayEngine
-             ├── PolicyGuard
-             ├── SessionController ←→ human operator
-             ├── PlaywrightSurface
-             └── EvidenceRecorder
-                      │
-                      ▼
-             structured run result
-```
-
-The system shares one action vocabulary and one `Surface` port between discovery and replay. Discovery decides which action to take; replay only interprets already-recorded actions.
-
-## 5. Proposed repository layout
+## 4. Repository layout (~10 source files)
 
 ```text
 .
-├── docker-compose.yml
-├── package.json
-├── tsconfig.json
-├── .env.example
-├── README.md
-├── REPORT.md
-├── PLAN.md
+├── docker-compose.yml   package.json   tsconfig.json   .env.example
+├── README.md   REPORT.md   PLAN.md
 ├── src/
-│   ├── cli.ts
-│   ├── config.ts
-│   ├── domain/
-│   │   ├── action.ts
-│   │   ├── artifact.ts
-│   │   ├── observation.ts
-│   │   ├── policy.ts
-│   │   └── result.ts
-│   ├── discovery/
-│   │   ├── discovery-engine.ts
-│   │   ├── model-adapter.ts
-│   │   ├── prompt.ts
-│   │   └── recorder.ts
-│   ├── replay/
-│   │   ├── replay-engine.ts
-│   │   ├── locator-resolver.ts
-│   │   └── outcome-detector.ts
-│   ├── surface/
-│   │   ├── surface.ts
-│   │   ├── playwright-surface.ts
-│   │   └── observe-page.ts
-│   ├── safety/
-│   │   ├── policy-guard.ts
-│   │   └── redactor.ts
-│   ├── handoff/
-│   │   ├── session-controller.ts
-│   │   └── human-event-recorder.ts
-│   └── evidence/
-│       └── evidence-recorder.ts
-├── capabilities/
-├── evidence/
-└── test/
-    ├── artifact.test.ts
-    ├── policy.test.ts
-    ├── replay.test.ts
-    └── redaction.test.ts
+│   ├── cli.ts              # discover | replay | validate | capabilities | invoke
+│   ├── config.ts           # env, policy config, secret resolution
+│   ├── schema.ts           # ALL Zod contracts: action, artifact, handler, policy,
+│   │                       #   observation, intervention, result
+│   ├── surface.ts          # Surface port + PlaywrightSurface + ARIA observation
+│   ├── locator.ts          # candidate list → exactly-one-match resolution
+│   ├── discovery.ts        # observe→decide→act loop, Anthropic adapter, recorder
+│   ├── replay.ts           # deterministic interpreter, handlers, checkpoints
+│   ├── safety.ts           # policy guard + redactor
+│   ├── handoff.ts          # ownership lock, intervention, human-event capture
+│   ├── evidence.ts         # JSONL events, screenshots, trace, run result
+│   └── catalog.ts          # stretch goal: list / describe / invoke by name
+├── capabilities/   evidence/   test/
 ```
 
-Files may be combined when an abstraction contains very little code. The directory structure expresses boundaries, not a target file count.
+The directory structure in the first draft (25 files across 7 subdirectories) expressed
+boundaries that these 11 files express just as well. Structure is not the deliverable.
 
-## 6. Core ports
+---
 
-### Surface
+## 5. Core ports
 
 ```ts
 interface Surface {
-  observe(): Promise<Observation>;
-  execute(action: ResolvedAction): Promise<ActionResult>;
-  verify(condition: Condition): Promise<VerificationResult>;
+  observe(): Promise<Observation>;            // ARIA tree + url/title + alerts + screenshot ref
+  execute(a: ResolvedAction): Promise<ActionResult>;
+  verify(c: Condition): Promise<VerificationResult>;
   captureEvidence(label: string): Promise<EvidenceRef>;
 }
-```
 
-`PlaywrightSurface` is the only version-one implementation. A future desktop adapter would implement the same intent-level contract while using OS accessibility and input APIs internally.
-
-### Discovery engine
-
-```ts
 interface DiscoveryEngine {
-  discover(request: DiscoveryRequest): Promise<DiscoveryResult>;
+  discover(req: DiscoveryRequest): Promise<DiscoveryResult>;
 }
-```
 
-The Vercel AI SDK implementation stays behind this interface. Replacing the model or adopting an agent framework later must not change saved artifacts or replay.
-
-### Session control
-
-```ts
 type SessionOwner = "automation" | "human";
-
 interface SessionController {
   readonly owner: SessionOwner;
-  requestIntervention(request: InterventionRequest): Promise<void>;
-  resumeAutomation(): Promise<void>;
+  requestIntervention(r: InterventionRequest): Promise<InterventionOutcome>;
+  resume(): Promise<void>;
 }
 ```
 
-The action executor must refuse automation actions while the session owner is `human`.
+`PlaywrightSurface` is the only v1 implementation. A desktop adapter implements the same
+*intent-level* contract over OS accessibility + input APIs. **The executor must throw if an
+automation action is attempted while `owner === "human"`** — that lock is the difference between
+a real handoff and a cosmetic one, and it is one of the five tests.
 
-## 7. Minimal hybrid observation
+---
 
-Each discovery step creates one observation containing:
+## 6. Action vocabulary
 
-- Current URL and page title.
-- A screenshot reference.
-- Visible text, capped to a reasonable length.
-- Visible interactive elements with temporary references such as `e1` and `e2`.
-- Visible alerts, dialogs, and validation messages.
-- A short recent-action history.
+`navigate` · `click` · `fill` · `select` · `wait` · `extract` · `assert`
 
-Example:
+Every model-produced action is Zod-parsed, then policy-checked, then executed. Values support
+templates:
 
 ```json
-{
-  "url": "http://localhost:8080/parabank/transfer.htm",
-  "title": "ParaBank | Transfer Funds",
-  "screenshot": "evidence/discovery-001/step-03.png",
-  "elements": [
-    {
-      "ref": "e1",
-      "tag": "input",
-      "role": "textbox",
-      "name": "Amount"
-    },
-    {
-      "ref": "e2",
-      "tag": "input",
-      "role": "button",
-      "name": "Transfer"
-    }
-  ]
-}
+{ "action": "fill", "target": {...}, "value": "{{inputs.accountId}}" }
+{ "action": "fill", "target": {...}, "value": "{{secrets.parabankPassword}}" }
 ```
 
-The model sees the screenshot and compact element list, then returns exactly one Zod-validated action or a terminal decision.
+Secret references are never resolved into the artifact — only at execution time, from env.
 
-```ts
-type DiscoveryDecision =
-  | { type: "act"; action: DiscoveryAction; rationale: string }
-  | { type: "complete"; outputs: Record<string, unknown> }
-  | { type: "stuck"; reason: string };
-```
+---
 
-Coordinate clicks are allowed only as a discovery fallback. After a coordinate click, the adapter uses `document.elementFromPoint()` and attempts to derive a stable locator. If it cannot, the recorded capability is marked `draft` and unsuitable for unattended replay.
-
-## 8. Action vocabulary
-
-Artifact version 1 supports only:
-
-- `navigate`
-- `click`
-- `fill`
-- `select`
-- `wait`
-- `extract`
-- `assert`
-
-Every model-produced action is parsed with Zod, checked by the policy guard, and only then executed.
-
-Values support parameter templates:
-
-```json
-{
-  "action": "fill",
-  "target": { "label": "Amount" },
-  "value": "{{inputs.amount}}"
-}
-```
-
-Secrets use runtime references and are never resolved into the artifact:
-
-```json
-{
-  "action": "fill",
-  "target": { "label": "Password" },
-  "value": "{{secrets.parabankPassword}}"
-}
-```
-
-## 9. Capability artifact
-
-The artifact is declarative JSON validated by a versioned Zod schema.
+## 7. Capability artifact
 
 ```ts
 interface CapabilityArtifactV1 {
   schemaVersion: "1.0";
+  capabilityId: string;          // stable identity across revisions
+  version: string;               // semver of THIS capability
+  derivedFrom?: { capabilityId: string; version: string };  // tenant/variant lineage
   metadata: {
-    name: string;
-    description: string;
-    revision: number;
+    name: string; description: string;
     status: "draft" | "approved";
     risk: "safe" | "approval_required" | "blocked";
-    recordedAt: string;
+    recordedAt: string; recordedBy: "llm" | "human";
   };
   target: {
     app: string;
-    appVersion?: string;
-    baseUrl: string;
+    appFingerprint?: string;     // observed version/branding marker → drift detection
+    baseUrl: string;             // resolved per tenant at invoke time, not baked in
   };
-  inputs: Record<string, InputDefinition>;
+  inputs:  Record<string, InputDefinition>;
   outputs: Record<string, OutputDefinition>;
-  steps: ArtifactStep[];
-  outcomes: OutcomeDefinition[];
+  steps:   ArtifactStep[];
+  handlers: Handler[];           // see below — the focal point
   checkpoint: Condition;
 }
 ```
 
-Each step contains:
+`capabilityId` / `version` / `derivedFrom` / `appFingerprint` are four fields that cost nothing
+and constitute the entire multi-tenant answer in Section 3.7: identity, lineage, and a drift
+signal.
 
-- Stable step ID.
-- One typed action.
-- Locator definition when the action targets a control.
-- Optional retry policy.
-- Optional risk override.
-- Optional expected postcondition.
+### 7.1 Handlers — the outcome/error model
 
-### Locator strategy
+This is the part the brief says it grades hardest, so it is data in the artifact, not logic in
+the engine. Handlers are evaluated **before and after every step**, not only at the end.
 
-A target contains an ordered list of candidates rather than a raw model reference:
-
-```json
-{
-  "candidates": [
-    { "strategy": "role", "role": "button", "name": "Transfer" },
-    { "strategy": "text", "value": "Transfer" },
-    { "strategy": "css", "value": "input[value='Transfer']" }
-  ]
+```ts
+interface Handler {
+  id: string;
+  match: Condition;                   // role+name | text | url pattern | http status
+  scope: "global" | string[];         // all steps, or specific step ids
+  disposition:
+    | { kind: "business_outcome"; outcome: string; extract?: Record<string, Extraction> }
+    | { kind: "recover"; remedy: "dismiss" | "retry_step" | "reauthenticate"; maxAttempts: number }
+    | { kind: "fail"; code: ErrorCode };
 }
 ```
 
-Replay tries candidates in order and requires exactly one visible match. Zero matches and ambiguous matches are failures; replay does not guess.
+Three payoffs for ~50 lines of interpreter:
 
-Prefer locators in this order:
+- It *is* the three-way distinction Section 3.3 demands (business outcome / recoverable / hard
+  failure), declared rather than hardcoded.
+- Recovery is never open-ended — a remedy is one of three named verbs with an attempt cap.
+- A tenant override adds a handler for a branded interstitial without forking the flow.
 
-1. Accessible role and name.
-2. Associated label.
-3. Stable visible text.
-4. Stable form name or ID.
-5. Structural CSS as a last DOM-level fallback.
-6. Coordinates only for draft artifacts requiring review.
+Example for `lookup_account_balance`:
 
-## 10. Deterministic replay
+```json
+[
+  { "id": "not_found", "match": { "text": "could not be found" }, "scope": "global",
+    "disposition": { "kind": "business_outcome", "outcome": "account_not_found" } },
+  { "id": "session_expired", "match": { "urlPattern": "**/login.htm" }, "scope": "global",
+    "disposition": { "kind": "recover", "remedy": "reauthenticate", "maxAttempts": 1 } },
+  { "id": "app_error", "match": { "text": "An internal error has occurred" }, "scope": "global",
+    "disposition": { "kind": "fail", "code": "APP_ERROR" } }
+]
+```
 
-Replay performs the following sequence:
+### 7.2 Steps and locators
 
-1. Parse and validate the artifact.
-2. Parse invocation inputs against the declared input definitions.
-3. Confirm the target and policy configuration.
-4. Start one browser context and evidence recorder.
-5. Resolve templates immediately before each step.
-6. Check the action against the policy allowlist.
-7. Resolve exactly one target control.
-8. Execute the action using explicit waits and bounded retries.
-9. Check the step postcondition when present.
-10. Detect declared business outcomes and known recoverable conditions.
-11. Extract declared outputs.
-12. Verify the final checkpoint.
-13. Return a structured result and close the trace.
+Each step: stable id, one typed action, target, optional postcondition, optional retry, optional
+risk override. A target is an **ordered candidate list**, never a raw model reference:
 
-The replay engine never calls the model to decide what to do.
+```json
+{ "candidates": [
+    { "strategy": "role",  "role": "link", "name": "Accounts Overview" },
+    { "strategy": "label", "value": "Account:" },
+    { "strategy": "text",  "value": "Accounts Overview" },
+    { "strategy": "css",   "value": "#accountId" }
+] }
+```
 
-## 11. Result and error taxonomy
+Preference order: accessible role+name → associated label → stable visible text → stable form
+name/id → structural CSS → coordinates (draft only). Replay tries candidates in order and
+requires **exactly one visible match**. Zero matches and ambiguous matches are both failures —
+replay never guesses.
 
-The caller receives one of three top-level result types:
+### 7.3 Outputs and extraction
+
+Outputs are not aspirational types; each declares how it is obtained and coerced:
+
+```ts
+interface OutputDefinition {
+  type: "string" | "number" | "boolean";
+  from: { target: Target; attribute?: string };
+  coerce?: "currency" | "trim" | "int";      // "$1,234.56" → 1234.56
+  onMissing: "fail" | "null";
+}
+```
+
+---
+
+## 8. Result contract — four statuses
 
 ```ts
 type RunResult =
-  | {
-      status: "success";
-      outputs: Record<string, unknown>;
-      evidence: EvidenceSummary;
-    }
-  | {
-      status: "business_outcome";
-      outcome: string;
-      details?: Record<string, unknown>;
-      evidence: EvidenceSummary;
-    }
-  | {
-      status: "failure";
-      error: RunError;
-      evidence: EvidenceSummary;
-    };
+  | { status: "success";          outputs: Record<string, unknown>; evidence: EvidenceSummary }
+  | { status: "business_outcome"; outcome: string; details?: object;  evidence: EvidenceSummary }
+  | { status: "escalated";        intervention: InterventionRef;      evidence: EvidenceSummary }
+  | { status: "failure";          error: RunError;                    evidence: EvidenceSummary };
 ```
 
-`RunError` includes:
+`escalated` is the second structural change from the first draft. A three-way contract had
+nowhere to put "paused, awaiting a human" — so when an agent invokes `transfer_funds`
+unattended and hits the approval gate, there was no honest thing to return. Making it a
+first-class status means escalation is part of the **contract** rather than a CLI affordance,
+which is exactly the control-transfer model the brief says it will focus on. It carries an
+intervention id and a resume token.
 
-- Error code.
-- Failed step ID and index.
-- Recoverability flag.
-- Expected state.
-- Sanitized observed state.
-- Screenshot and trace references.
-- Attempt count.
+`RunError` carries: code, failed step id + index, recoverable flag, expected state, sanitized
+observed state, screenshot + trace refs, attempt count.
 
-Initial error codes:
+Error codes (trimmed from 9 to 7 — `INPUT_INVALID` is caught before the run starts, and
+`SESSION_EXPIRED` is now a handler remedy, not a terminal code):
 
-- `TARGET_NOT_FOUND`
-- `TARGET_AMBIGUOUS`
-- `STEP_TIMEOUT`
-- `CHECKPOINT_FAILED`
-- `POLICY_DENIED`
-- `SESSION_EXPIRED`
-- `UNEXPECTED_DIALOG`
-- `INPUT_INVALID`
-- `HUMAN_ABORTED`
+`TARGET_NOT_FOUND` · `TARGET_AMBIGUOUS` · `STEP_TIMEOUT` · `CHECKPOINT_FAILED` ·
+`POLICY_DENIED` · `APP_ERROR` · `HUMAN_ABORTED`
 
-Retries are bounded and only apply to declared recoverable operations such as navigation, waiting, or transient target absence. Validation errors and policy denials are never blindly retried.
+Every run result also records **`modelCalls: 0`** for replay. One line, and it turns "no LLM in
+the decision loop" from a claim into evidence.
 
-## 12. Safety policy
+---
 
-Policy configuration contains:
+## 9. Deterministic replay
 
-- Allowed origins.
-- Optional allowed path patterns.
-- Allowed action types.
-- Blocked action types or targets.
-- Rules that require approval.
-- Maximum steps and run timeout.
+1. Validate artifact; validate inputs against declared `inputs` (fail fast, before the browser).
+2. Resolve `baseUrl` + secrets from tenant/env config; confirm policy.
+3. Open browser context, start trace and evidence recorder.
+4. Per step: evaluate global handlers → resolve templates → policy-check → resolve exactly one
+   target → execute with explicit waits and bounded retries → check postcondition → evaluate
+   handlers again.
+5. A matched handler short-circuits to its disposition (return outcome / apply remedy / fail).
+6. Extract declared outputs, verify the final checkpoint, close the trace, return `RunResult`.
 
-The guard runs for both discovery and replay. Redirects are checked after navigation so the browser cannot silently leave the allowlisted origin.
+Retries apply only to declared-recoverable operations. Validation errors and policy denials are
+never retried.
 
-Risk classes:
+---
 
-| Class | Behavior |
+## 10. Safety
+
+Policy config: allowed origins, allowed path patterns, allowed action types, blocked
+actions/targets, approval rules, max steps, run timeout. Enforced in **both** discovery and
+replay. Redirects are re-checked after navigation so the browser cannot silently leave the
+allowlist.
+
+| Risk class | Behavior |
 |---|---|
-| `safe` | Execute automatically |
-| `approval_required` | Pause and hand control to a human |
-| `blocked` | Stop with `POLICY_DENIED` |
+| `safe` | execute |
+| `approval_required` | escalate → human owns the session |
+| `blocked` | stop with `POLICY_DENIED` |
 
-For the demo, submitting a funds transfer is `approval_required`. The human manually performs or declines the final action in the same browser session.
+Data handling: credentials via env only; artifacts store secret *references*; observations redact
+password fields before they reach the prompt; all logs pass a central redactor; human-input
+events record target metadata but never secret-field values; demo data is synthetic.
 
-### Data handling
+---
 
-- Credentials enter through environment variables or runtime secret values.
-- Artifact templates retain secret references, never resolved values.
-- Prompt observations redact password fields and configured sensitive patterns.
-- Logs pass through a central redactor before being written.
-- Human-input events record target metadata but redact sensitive values.
-- Screenshots containing sensitive data must either be avoided, masked before capture, or clearly use synthetic demo data.
-
-## 13. Human escalation and control transfer
-
-An intervention request contains:
+## 11. Escalation and control transfer
 
 ```ts
 interface InterventionRequest {
-  runId: string;
-  capability?: string;
-  goal?: string;
+  runId: string; interventionId: string;
+  capabilityId?: string; goal?: string;
   step?: { id: string; index: number };
   reason: "approval_required" | "agent_stuck" | "replay_blocked";
-  message: string;
-  screenshot: string;
-  observedState: Record<string, unknown>;
+  message: string; screenshot: string; observedState: object;
 }
 ```
 
-Minimal version-one handoff:
+Sequence: pause loop → set `owner = "human"` → persist request + screenshot → print context in
+CLI → leave the *same* headed browser open → capture sanitized human events → wait for
+resume/abort → fresh observation + screenshot → `owner = "automation"` → verify the next
+postcondition or checkpoint.
 
-1. Pause the automation loop.
-2. Change session ownership to `human`.
-3. Save the intervention request and screenshot.
-4. Print the intervention context in the CLI.
-5. Leave the same headed Playwright browser open.
-6. Let the human operate the page directly.
-7. Capture sanitized browser click/change events while human ownership is active.
-8. Wait for the operator to press Enter or abort.
-9. Take a fresh observation and screenshot.
-10. Return ownership to `automation`.
-11. Verify the next postcondition or final checkpoint.
+Two implementation notes that decide whether this is real:
 
-Production evolution would replace the CLI and local window with an intervention queue and remote session streaming without changing the ownership contract.
+- **Human-event listeners must be installed with `page.addInitScript`**, not injected once.
+  Injected listeners die on the first navigation, and you would silently record nothing after
+  the human clicks anything that loads a page.
+- **The ownership lock is enforced in the executor and tested.** Everything else here is
+  presentation.
 
-## 14. Evidence model
+Documented cut: stdin stands in for an intervention queue, and the headed local window stands in
+for remote session streaming. The ownership contract is unchanged by either. *If* milestones 1–3
+land early, upgrade to a ~60-line local HTTP operator page (context + screenshot + Resume/Abort,
+polling the intervention file) — that makes control transfer an out-of-process contract rather
+than a stdin one. Nice-to-have, not scope.
 
-Each run writes to its own directory:
+Also documented: the handoff demo requires a headed browser, so it is not headless/CI-runnable.
+
+---
+
+## 12. Evidence
 
 ```text
 evidence/<run-id>/
-├── run.json
-├── events.jsonl
-├── result.json
-├── trace.zip
-├── step-001-before.png
-├── step-001-after.png
+├── run.json  events.jsonl  result.json  trace.zip
+├── step-00N-{before,after}.png
 └── intervention.json
 ```
 
-Each event includes:
+Each event: timestamp, run id, phase (`discovery` | `replay` | `human`), step id, action type,
+sanitized args, discovery rationale, duration, result/error code, evidence refs.
 
-- Timestamp and run ID.
-- Phase: `discovery`, `replay`, or `human`.
-- Step ID.
-- Action type and sanitized arguments.
-- Discovery rationale when applicable.
-- Duration.
-- Result or error code.
-- Evidence references.
+Committed examples (four runs):
 
-The repository should include committed example evidence for:
+1. Real LLM discovery of `lookup_account_balance`.
+2. Successful unattended replay with typed outputs.
+3. Replay returning the `account_not_found` business outcome.
+4. Replay of `transfer_funds` escalating and a human completing it in the live session.
 
-1. One real LLM discovery run.
-2. One successful deterministic replay.
-3. One replay producing a business outcome or injected recoverable condition.
-4. One human handoff during a risky step.
+Failure injection uses Playwright `page.route()` against ParaBank (a 500, a stall, a login
+bounce). No second target app is authored — route interception covers Section 3.3 for free.
 
-## 15. Initial ParaBank capability
+---
 
-### `transfer_funds`
+## 13. ParaBank — verify before committing
 
-Goal example:
+The first draft assumed seeded account ids (`--input fromAccount=12345`). ParaBank generates
+accounts per registration against an in-memory DB, so that assumption would make the reviewer's
+replay non-reproducible. Resolve these **first**, in the day-0 spike:
 
-> Transfer 25 dollars from account 12345 to account 67890 and confirm the result.
+- Which image tag actually exists (`:latest` is the common one; confirm before pinning a digest).
+- Whether a deterministic login exists out of the box, and whether the DB resets on restart.
+- Whether an admin/init endpoint can seed known state.
 
-Inputs:
+Then add an idempotent `npm run setup` that registers a known synthetic user and writes the
+resulting account ids to `.env`. Using ParaBank's REST service **for fixture seeding only** is
+legitimate and fast — say so explicitly in REPORT.md ("API for setup, UI for the task under
+automation"), because it is the obvious reviewer question.
 
-- `fromAccount: string`
-- `toAccount: string`
-- `amount: number`, greater than zero
+The CLI must fail clearly when ParaBank is unreachable rather than burning agent steps.
 
-Outputs:
+---
 
-- `confirmationMessage: string`
-- `transferredAmount?: number`
-
-Checkpoint:
-
-- The transfer confirmation heading or confirmation text is visible.
-
-Potential business outcomes will be based on actual ParaBank behavior observed during implementation. We should not invent unsupported messages in advance.
-
-Risk behavior:
-
-- Navigating and filling the transfer form are safe.
-- Submitting the transfer requires human control.
-- During discovery, the operator may approve and perform the submission.
-- During replay, the same approval boundary is enforced from the artifact and policy.
-
-## 16. Docker Compose target
-
-Use the official ParaBank image and pin it to an immutable digest after verifying it locally.
-
-```yaml
-services:
-  parabank:
-    image: parasoft/parabank:baseline
-    ports:
-      - "8080:8080"
-```
-
-Expected lifecycle:
+## 14. CLI
 
 ```bash
-docker compose up -d
-docker compose down
-docker compose down -v # deliberate clean reset
+docker compose up -d && npm run setup
+
+npm run cli -- discover --goal "Look up account <id> and read its balance" \
+  --target parabank --out capabilities/lookup-account-balance.v1.json --headed
+
+npm run cli -- replay --artifact capabilities/lookup-account-balance.v1.json \
+  --input accountId=13344
+
+npm run cli -- replay --artifact capabilities/lookup-account-balance.v1.json \
+  --input accountId=99999            # → business_outcome: account_not_found
+
+npm run cli -- replay --artifact capabilities/transfer-funds.v1.json \
+  --input from=13344 --input to=13355 --input amount=25 --headed   # → escalated
+
+npm run cli -- validate capabilities/lookup-account-balance.v1.json
+
+# stretch: agent-facing catalog
+npm run cli -- capabilities
+npm run cli -- invoke lookup_account_balance --args '{"accountId":"13344"}'
 ```
 
-Add a health check if the image exposes a reliable endpoint. The CLI should fail clearly when ParaBank is unavailable rather than consuming agent steps.
+---
 
-## 17. CLI contract
+## 15. Stretch goal — exactly one
 
-Target commands:
+**Agent-facing capability catalog** (`capabilities` / `describe` / `invoke <name> --args`).
+~40 lines over the replay engine, and it is literally the brief's through-line: *"a capability an
+AI agent can call."* It emits each artifact's inputs/outputs as a tool schema, which is the
+cheapest possible demonstration that the artifact is a contract and not a step list.
 
-```bash
-# Start ParaBank
-docker compose up -d
+Everything else in Section 8 of the brief is skipped and listed under Cuts.
 
-# Run genuine LLM discovery and save an artifact
-npm run cli -- discover \
-  --goal "Transfer 25 dollars between the configured demo accounts" \
-  --target parabank \
-  --output capabilities/transfer-funds.v1.json \
-  --headed
+---
 
-# Replay without model decisions
-npm run cli -- replay \
-  --artifact capabilities/transfer-funds.v1.json \
-  --input fromAccount=12345 \
-  --input toAccount=67890 \
-  --input amount=25 \
-  --headed
+## 16. Milestones (3, not 6)
 
-# Validate an artifact without running it
-npm run cli -- validate capabilities/transfer-funds.v1.json
-```
+### Day 0 — de-risk (≤1 hour, throwaway)
 
-Exact account values will be documented after inspecting the pinned ParaBank instance. Credentials belong in `.env`, with safe placeholders in `.env.example`.
+Spike the observe→decide→act loop against ParaBank with `claude-opus-5` and confirm the model
+can actually drive it from an ARIA snapshot. Confirm the ParaBank questions in §13. Then throw
+the spike away.
 
-## 18. Implementation sequence
+Rationale: "deterministic core first" is the right build order, but it parks the one
+non-negotiable deliverable — a real LLM run against a live surface — behind everything else. An
+hour up front removes that risk without changing the order.
 
-### Phase 1 — Bootstrap and contracts
+### Milestone 1 — contracts + deterministic replay
 
-- Initialize the TypeScript project.
-- Add Playwright, Vercel AI SDK, selected provider adapter, Zod, and a small CLI parser.
-- Add Docker Compose for ParaBank.
-- Define Zod schemas for actions, artifacts, policies, observations, interventions, and run results.
-- Implement config loading and environment validation.
-- Write schema and redaction unit tests first.
+Zod schemas; ARIA observation; locator resolution with strict uniqueness; action executor;
+evidence/JSONL/trace; template + secret resolution; the handler interpreter; checkpoint
+verification; the four-status result.
 
-Exit condition: ParaBank starts locally, the CLI loads configuration, and example artifacts can be validated.
+*Exit:* a **hand-authored** `lookup_account_balance` artifact replays end-to-end, returns typed
+outputs, and returns `account_not_found` on a bad id — with no model involved.
 
-### Phase 2 — Playwright surface and evidence
+### Milestone 2 — safety + handoff
 
-- Launch a persistent headed or headless browser context.
-- Implement compact interactive-element extraction.
-- Capture screenshots and Playwright traces.
-- Resolve locator candidates with strict uniqueness checks.
-- Implement the shared action executor.
-- Emit redacted JSONL events.
+Origin/route/action allowlists in both paths; risk classification; ownership lock; intervention
+request + persistence + CLI prompt; `addInitScript` human-event capture; re-observe on resume.
 
-Exit condition: A hard-coded typed action sequence can navigate ParaBank and produce evidence.
+*Exit:* `transfer_funds` replay escalates, a person acts in the same browser, control returns,
+and evidence is continuous across the seam.
 
-### Phase 3 — Deterministic replay
+### Milestone 3 — real discovery + evidence + docs
 
-- Implement parameter and secret-template resolution.
-- Implement the linear artifact interpreter.
-- Add step postconditions, outcome detection, bounded retries, and final checkpoint verification.
-- Return the structured three-way result contract.
-- Test replay using a small hand-authored artifact before involving the LLM.
+Anthropic adapter with tool-use action schema; bounded discovery loop with policy check before
+every action; ref → durable locator-candidate derivation; parameterization of observed values;
+artifact emission at `status: "draft"`. Then capture the four evidence runs, write README.md and
+REPORT.md (seven required headings), and the catalog stretch if time remains.
 
-Exit condition: A hand-authored transfer capability reaches the approval boundary deterministically and reports structured failures.
+*Exit:* a real model-driven run produces an artifact the deterministic engine replays.
 
-### Phase 4 — Safety and human handoff
+---
 
-- Add origin, route, and action allowlists.
-- Classify transfer submission as `approval_required`.
-- Implement the session-owner state and CLI intervention prompt.
-- Record sanitized human browser events.
-- Re-observe and verify after control returns.
+## 17. Tests — five that matter
 
-Exit condition: Replay pauses, a person acts in the same browser, and replay resumes or completes with continuous evidence.
+1. **Schema round-trip** — valid v1 accepted, invalid action/handler rejected.
+2. **Template + secret resolution** — inputs resolve correctly; a resolved secret never
+   serializes into an artifact.
+3. **Redaction** — passwords, configured patterns, and human-event values are scrubbed from logs.
+4. **Locator resolution** — zero matches and multiple matches both fail, distinctly.
+5. **Outcome classification** — a handler match returns `business_outcome`, not `failure`; the
+   ownership lock rejects an automation action while `owner === "human"`.
 
-### Phase 5 — LLM discovery and recording
+The first draft listed twelve. The brief says "tested where it counts." These five cover every
+place where a bug would be invisible.
 
-- Implement the Vercel AI SDK adapter with structured model output.
-- Build the bounded observe-decide-act loop.
-- Run policy validation before every action.
-- Convert temporary element references into durable locator candidates.
-- Parameterize known invocation values instead of persisting concrete values.
-- Emit a draft capability from a successful discovery run.
+---
 
-Exit condition: One real model-driven ParaBank run creates an artifact that the deterministic engine can replay.
+## 18. Heterogeneity and multi-tenant — seams, not builds
 
-### Phase 6 — Failure scenarios, documentation, and evidence
+**Surfaces.** Artifacts carry intent-level actions and locator *candidates*, not Playwright
+calls. `PlaywrightSurface` translates to web operations; a desktop surface translates the same
+actions to accessibility-tree nodes or coordinates. Because the observation is already an
+ARIA/role-name tree, the desktop seam is a different producer of the same shape — not a rewrite.
+Candidate strategies are a discriminated union, so a surface-specific strategy is additive.
 
-- Capture a successful discovery run and replay.
-- Capture one known business outcome or validation error.
-- Inject one transient delay or failed request through Playwright routing and demonstrate bounded recovery if useful.
-- Complete `README.md` with exact setup and demo commands.
-- Complete `REPORT.md` using the seven required headings.
-- Explain deliberate cuts and the seams for desktop surfaces and tenant overrides.
+**Tenants.** `capabilityId` + `version` define a vendor/app-level capability. `baseUrl`,
+credentials, and allowed routes resolve from tenant config at invoke time. A tenant needing
+divergence ships an **override** — extra handlers or extra locator candidates keyed by step id,
+with `derivedFrom` recording lineage — not a copied artifact. `appFingerprint` plus replay
+history gives the drift signal. A tenant-specific fallback is never silently promoted into the
+base artifact.
 
-Exit condition: A reviewer can clone the repository, start ParaBank, run discovery, replay the artifact, inspect evidence, and understand all tradeoffs.
+---
 
-## 19. Testing strategy
-
-Keep tests concentrated on logic with the highest consequence.
-
-### Unit tests
-
-- Artifact schema accepts valid version-one files and rejects invalid actions.
-- Input values are correctly typed and template-resolved.
-- Secret references never serialize resolved values.
-- Redaction covers configured secrets, passwords, and sensitive input fields.
-- Policy blocks disallowed origins and actions.
-- Result classification preserves the difference between business outcomes and failures.
-
-### Integration tests
-
-- Locator resolution fails on zero or multiple matches.
-- Replay stops at an approval-required step.
-- Automation cannot act while the human owns the session.
-- Returning control triggers a fresh observation before continuing.
-- A failed checkpoint produces step-level evidence.
-- A transient delay gets only the configured number of retries.
-
-### Manual end-to-end acceptance
-
-1. Start ParaBank with Docker Compose.
-2. Run discovery with a real model.
-3. Confirm that the saved artifact contains parameters and no secrets.
-4. Replay with different valid inputs and verify no model decision call occurs.
-5. Observe the transfer approval handoff.
-6. Complete the action manually in the same browser.
-7. Return control and verify the structured result.
-8. Run an invalid input or failure scenario and inspect its evidence.
-
-## 20. Heterogeneity and multi-tenant design seam
-
-Do not build these features, but preserve two extension points:
-
-### Surface heterogeneity
-
-- Artifacts express intent-level actions and locator candidates.
-- `PlaywrightSurface` translates those actions to web operations.
-- A desktop surface could translate the same actions to accessibility-tree nodes, OCR targets, or coordinates.
-- Surface-specific locator candidates can be discriminated by type without changing the capability contract.
-
-### Multi-tenant reuse
-
-- Treat the main capability as a vendor/app-level definition.
-- Resolve `baseUrl`, credentials, and allowed routes from tenant configuration.
-- Allow a small tenant/version override map for locator candidates, not full artifact copies.
-- Record the target app/version and replay history so drift can be detected.
-- Never silently promote a tenant-specific fallback into the shared base artifact.
-
-## 21. Likely implementation risks
+## 19. Risks
 
 | Risk | Mitigation |
 |---|---|
-| ParaBank startup or seeded data differs by image version | Pin an immutable image digest and document known demo state |
-| Model emits malformed or unsafe actions | Require structured output, Zod parsing, and policy validation |
-| Model-selected temporary references do not yield stable locators | Generate candidates from the actual element and mark unresolved artifacts as draft |
-| Replay appears deterministic but relies on implicit timing | Use explicit conditions, strict locators, and bounded waits |
-| Human activity leaks typed values | Record event metadata through the redactor; never log secret-field contents |
-| The handoff is only cosmetic | Enforce an ownership lock that prevents automation actions while human control is active |
-| Error handling becomes app-specific | Keep generic engine errors separate from artifact-declared business outcomes |
-| Framework replacement affects replay | Restrict model and agent dependencies to `DiscoveryEngine` |
+| ParaBank account ids / DB state not reproducible | `npm run setup` seeds a known user; day-0 verification; documented state |
+| Model emits malformed or unsafe actions | tool use with `strict: true`, Zod parse, policy check before execute |
+| Model's element ref yields no stable locator | ARIA-first observation makes role+name the default; unresolved → `status: "draft"` |
+| Replay looks deterministic but depends on timing | explicit conditions, exactly-one-match locators, bounded waits |
+| Human event capture silently records nothing | `page.addInitScript`, re-bound per document; asserted in the handoff evidence |
+| Handoff is cosmetic | ownership lock enforced in the executor, covered by test 5 |
+| Error handling drifts app-specific | generic engine errors vs. artifact-declared handlers, kept separate |
 
-## 22. Definition of done
+---
 
-- ParaBank starts with one Docker Compose command.
-- A real LLM-driven discovery run completes against its live UI.
-- Discovery emits a valid, versioned, parameterized artifact.
-- The artifact contains no credentials or raw sensitive values.
-- Replay executes the artifact without LLM decision calls.
-- Replay verifies a checkpoint and returns declared outputs.
-- At least one business outcome or failure is reported distinctly and with useful evidence.
-- A risky step transfers control to a human using the same live browser session.
-- Human actions are captured in sanitized form and control can return to automation.
-- Domain and action allowlists are enforced during both discovery and replay.
-- Example evidence exists for discovery and replay.
-- `README.md` contains exact setup and demo commands.
-- `REPORT.md` contains the seven headings required by the assignment.
+## 20. Definition of done
 
-## 23. First implementation task
+- One Docker Compose command + `npm run setup` yields reproducible state.
+- A real `claude-opus-5` discovery run completes against the live ParaBank UI.
+- Discovery emits a valid, versioned, parameterized artifact with no credentials in it.
+- Replay runs with `modelCalls: 0`, verifies a checkpoint, returns declared typed outputs.
+- A bad input returns `business_outcome: account_not_found`, distinctly from any failure.
+- A risky step returns `escalated`; a human completes it in the *same* live browser; control
+  returns and the run finishes.
+- Allowlists enforced in both discovery and replay.
+- `/evidence/` holds all four runs.
+- README.md has exact setup + demo commands; REPORT.md has the seven required headings,
+  including an explicit Cuts section naming: the operator console, desktop surface, tenant
+  overrides, LLM-assisted replay recovery, and the four unused stretch goals.
 
-Begin with the deterministic foundation rather than the LLM loop:
+---
 
-1. Create the TypeScript project and Docker Compose file.
-2. Start and inspect the pinned ParaBank image.
-3. Define the Zod contracts.
-4. Hand-author the smallest valid `transfer_funds` artifact.
-5. Make Playwright replay it up to the approval boundary.
+## 21. First task
 
-Once that works, add handoff and evidence, then place LLM discovery in front of the same action and artifact contracts. This order prevents model behavior from obscuring problems in the replay design.
+Day-0 spike (§16) — verify ParaBank's image, login, and account seeding, and confirm the model
+can drive it from an ARIA snapshot. Then discard the spike and start Milestone 1 with
+`schema.ts` and a hand-authored `lookup_account_balance` artifact.
