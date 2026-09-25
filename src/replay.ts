@@ -43,6 +43,7 @@ import {
 import { createRedactor, type Redactor } from "./redact.js";
 import {
   PlaywrightSurface,
+  closeSurface,
   describeCondition,
   type Surface,
   type SurfaceFactory,
@@ -369,15 +370,12 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
     // afterwards is a different problem, and is recorded as one rather than replacing the
     // answer the caller asked for.
     if (surface) {
-      try {
-        const trace = await surface.close();
-        if (trace) recorder.setTrace(trace);
-      } catch (err) {
+      const closed = await closeSurface(surface);
+      if (closed.ok) {
+        if (closed.trace) recorder.setTrace(closed.trace);
+      } else {
         await recorder
-          .event({
-            type: "surface.teardown_failed",
-            detail: { reason: redact(err instanceof Error ? err.message : String(err)) },
-          })
+          .event({ type: "surface.teardown_failed", detail: { reason: redact(closed.reason) } })
           .catch(() => {});
       }
     }

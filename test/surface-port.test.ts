@@ -277,6 +277,38 @@ describe("setup and teardown stay inside the result contract (PR11 review)", () 
     }
   }, 30_000);
 
+  it("keeps a successful result when teardown HANGS rather than rejects", async () => {
+    // Catching a rejection was only half of it. An adapter that never settles traps the
+    // computed result in `finally` exactly as effectively as one that throws, and an unbounded
+    // await cannot tell slow from never. Teardown is raced against a deadline.
+    const evidenceRoot = await mkdtemp(join(tmpdir(), "port-"));
+    try {
+      const fake = new FakeDesktopSurface();
+      fake.close = () => new Promise<undefined>(() => {}); // never settles
+
+      const started = Date.now();
+      const result = await replay({
+        artifact,
+        inputs: { accountId: "12345" },
+        secrets: { user: "operator" },
+        policy: policy(),
+        evidenceRoot,
+        createSurface: async () => fake,
+      });
+
+      expect(result.status).toBe("success");
+      if (result.status === "success") expect(result.outputs).toEqual({ accountType: "CHECKING" });
+      // Bounded: it gave up rather than waiting forever.
+      expect(Date.now() - started).toBeLessThan(20_000);
+
+      const events = await readFile(join(result.evidence.directory, "events.jsonl"), "utf8");
+      expect(events).toContain("surface.teardown_failed");
+      expect(events).toContain("did not finish within");
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  }, 40_000);
+
   it("keeps a successful result when teardown fails", async () => {
     // The run produced typed outputs and verified its checkpoint. Failing to shut the surface
     // down afterwards must not discard that.
@@ -342,4 +374,32 @@ describe("discovery honours the same contract (PR11 review #1)", () => {
       await rm(evidenceRoot, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+describe("closeSurface bounds teardown", () => {
+  it("gives up on a hanging close and says why", async () => {
+    const { closeSurface } = await import("../src/surface.js");
+    const hanging = { close: () => new Promise<undefined>(() => {}) } as never;
+
+    const started = Date.now();
+    const result = await closeSurface(hanging, 200);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("did not finish within 200ms");
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  it("still reports a rejection distinctly from a hang", async () => {
+    const { closeSurface } = await import("../src/surface.js");
+    const rejecting = { close: async () => { throw new Error("adapter exploded"); } } as never;
+    const result = await closeSurface(rejecting, 1_000);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("adapter exploded");
+  });
+
+  it("returns the trace path on a clean close", async () => {
+    const { closeSurface } = await import("../src/surface.js");
+    const clean = { close: async () => "evidence/run/trace.zip" } as never;
+    const result = await closeSurface(clean, 1_000);
+    expect(result).toEqual({ ok: true, trace: "evidence/run/trace.zip" });
+  });
 });

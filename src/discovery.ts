@@ -38,6 +38,7 @@ import { createRedactor } from "./redact.js";
 import { GuardedSurface, PolicyGuard } from "./safety.js";
 import {
   PlaywrightSurface,
+  closeSurface,
   describeCondition,
   type Surface,
   type SurfaceFactory,
@@ -417,36 +418,17 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
     await recorder.event({ type: "discovery.failed", detail: { reason } });
     return { status: "failed", reason, evidenceDir: recorder.directory, modelCalls };
   } finally {
-    await closeQuietly(surface, recorder);
+    if (surface) {
+      const closed = await closeSurface(surface);
+      if (!closed.ok) {
+        await recorder
+          .event({ type: "surface.teardown_failed", detail: { reason: redact(closed.reason) } })
+          .catch(() => {});
+      }
+    }
   }
 }
 
-
-/**
- * Tears a surface down without letting the teardown replace the run's result.
- *
- * `close()` sat unprotected in a `finally`, so an adapter that rejected while shutting down
- * would throw out of the function — discarding an otherwise valid success or structured
- * failure, and skipping the evidence write entirely. The run genuinely happened; failing to
- * clean up afterwards is a different problem and is recorded as one.
- */
-async function closeQuietly(
-  surface: Surface | undefined,
-  recorder: EvidenceRecorder,
-): Promise<string | undefined> {
-  if (!surface) return undefined;
-  try {
-    return await surface.close();
-  } catch (err) {
-    await recorder
-      .event({
-        type: "surface.teardown_failed",
-        detail: { reason: err instanceof Error ? err.message : String(err) },
-      })
-      .catch(() => {});
-    return undefined;
-  }
-}
 
 // ─── Observation rendering ─────────────────────────────────────────────────────
 

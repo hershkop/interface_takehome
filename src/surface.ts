@@ -588,6 +588,54 @@ async function installHumanEventCapture(
   );
 }
 
+/**
+ * How long a surface gets to shut down before the run stops waiting on it.
+ *
+ * Generous for a browser, which normally closes in well under a second, and short enough that a
+ * wedged adapter cannot hold a finished run hostage.
+ */
+export const TEARDOWN_TIMEOUT_MS = 10_000;
+
+/**
+ * Closes a surface without letting teardown decide the run's outcome.
+ *
+ * Catching a rejection is only half of it: an adapter that *hangs* traps the computed result in
+ * `finally` just as effectively as one that throws, and an unbounded `await` cannot tell the
+ * difference between slow and never. So teardown is raced against a deadline.
+ *
+ * The trade is deliberate. Giving up on a close can leave the underlying process alive — an
+ * orphaned browser, which `stop.sh` reaps — whereas waiting forever loses a result that was
+ * already correct. A recoverable leak beats an unrecoverable hang.
+ *
+ * Returns a result instead of recording one, so this stays free of any dependency on evidence.
+ */
+export async function closeSurface(
+  surface: Surface,
+  timeoutMs: number = TEARDOWN_TIMEOUT_MS,
+): Promise<{ ok: true; trace?: string } | { ok: false; reason: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<{ ok: false; reason: string }>((resolve) => {
+    timer = setTimeout(
+      () => resolve({ ok: false, reason: `teardown did not finish within ${timeoutMs}ms` }),
+      timeoutMs,
+    );
+  });
+
+  const closing = surface
+    .close()
+    .then((trace) => ({ ok: true as const, ...(trace ? { trace } : {}) }))
+    .catch((err: unknown) => ({
+      ok: false as const,
+      reason: err instanceof Error ? err.message : String(err),
+    }));
+
+  try {
+    return await Promise.race([closing, expiry]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
