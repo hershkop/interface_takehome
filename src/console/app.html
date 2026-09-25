@@ -254,7 +254,13 @@
     });
     const payload = await res.json();
     if (res.ok) {
-      if (issuesEl) issuesEl.innerHTML = `<div class="ok">saved — ${esc(payload.saved)}</div>`;
+      if (issuesEl) {
+        issuesEl.innerHTML =
+          `<div class="ok">saved — ${esc(payload.saved)}</div>` +
+          (payload.notesRedacted
+            ? `<div class="err">sensitive content in the note was redacted before saving</div>`
+            : "");
+      }
       await loadCapabilities();
       return true;
     }

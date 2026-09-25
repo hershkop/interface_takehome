@@ -68,8 +68,36 @@ export async function loadCatalog(
       artifact: parsed.data,
     });
   }
+  // A capabilityId is the name an agent invokes. Two files claiming the same name is not a
+  // versioning scheme — it is an ambiguity, and resolving it by taking the first match meant
+  // the FILENAME silently decided which revision ran. Both are rejected rather than one being
+  // picked: refusing to answer is better than answering arbitrarily, and a capability that
+  // vanishes from the catalog with a stated reason gets fixed, while one that quietly runs the
+  // wrong revision does not.
+  const byId = new Map<string, CatalogEntry[]>();
+  for (const entry of entries) {
+    const group = byId.get(entry.capabilityId) ?? [];
+    group.push(entry);
+    byId.set(entry.capabilityId, group);
+  }
+
+  const unique: CatalogEntry[] = [];
+  for (const [capabilityId, group] of byId) {
+    if (group.length === 1) {
+      unique.push(group[0]!);
+      continue;
+    }
+    const where = group.map((g) => `${g.path} (v${g.version})`).join(", ");
+    for (const duplicate of group) {
+      invalid.push({
+        path: duplicate.path,
+        reason: `duplicate capabilityId "${capabilityId}" — also declared by ${where}. Keep one; older revisions belong in git history.`,
+      });
+    }
+  }
+
   return {
-    entries: options.agentFacing ? entries.filter((e) => e.status === "approved") : entries,
+    entries: options.agentFacing ? unique.filter((e) => e.status === "approved") : unique,
     invalid,
   };
 }

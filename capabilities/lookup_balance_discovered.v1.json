@@ -10,7 +10,7 @@
     "recordedAt": "2026-09-24T15:05:24.222Z",
     "recordedBy": "llm",
     "model": "claude-opus-5",
-    "notes": "Reviewed: replays cleanly on four accounts, but records no handlers — needs account_not_found before approval."
+    "notes": "Replays cleanly on four accounts, but records no handlers — needs an account_not_found handler before approval."
   },
   "target": {
     "app": "parabank",
