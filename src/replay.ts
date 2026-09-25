@@ -43,6 +43,7 @@ import {
 import { createRedactor, type Redactor } from "./redact.js";
 import {
   PlaywrightSurface,
+  closeSurface,
   describeCondition,
   type Surface,
   type SurfaceFactory,
@@ -363,9 +364,20 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       },
     };
   } finally {
+    // Unprotected, a rejecting close() threw out of the finally — losing the result that had
+    // already been computed and skipping recorder.finish() entirely. A run that produced typed
+    // outputs and verified its checkpoint genuinely succeeded; failing to shut the surface down
+    // afterwards is a different problem, and is recorded as one rather than replacing the
+    // answer the caller asked for.
     if (surface) {
-      const trace = await surface.close();
-      if (trace) recorder.setTrace(trace);
+      const closed = await closeSurface(surface);
+      if (closed.ok) {
+        if (closed.trace) recorder.setTrace(closed.trace);
+      } else {
+        await recorder
+          .event({ type: "surface.teardown_failed", detail: { reason: redact(closed.reason) } })
+          .catch(() => {});
+      }
     }
   }
 

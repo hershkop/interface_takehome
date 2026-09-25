@@ -36,7 +36,13 @@ import { EvidenceRecorder, newRunId, type EvidenceEvent } from "./evidence.js";
 import { SessionController, type InterventionChannel } from "./handoff.js";
 import { createRedactor } from "./redact.js";
 import { GuardedSurface, PolicyGuard } from "./safety.js";
-import { PlaywrightSurface, describeCondition, type SurfaceFactory } from "./surface.js";
+import {
+  PlaywrightSurface,
+  closeSurface,
+  describeCondition,
+  type Surface,
+  type SurfaceFactory,
+} from "./surface.js";
 import { isSensitiveSecretKey, resolveTemplate, type TemplateScope } from "./template.js";
 
 const MODEL = "claude-opus-5";
@@ -217,29 +223,38 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
   const anthropic = new Anthropic({ apiKey: request.apiKey });
   const maxSteps = Math.min(request.maxSteps ?? 25, request.policy.maxSteps);
 
+  let surface: Surface | undefined;
   const launch: SurfaceFactory = request.createSurface ?? PlaywrightSurface.launch;
-  const surface = await launch({
-    ...(request.headed === undefined ? {} : { headed: request.headed }),
-    navigationAllowed: guard.navigationAllowed,
-  });
-  const guarded = new GuardedSurface(surface, guard, (reason) => {
-    void recorder.event({ type: "policy.denied", detail: { reason } });
-  });
-  guard.begin();
-
-  const controller = request.interventionChannel
-    ? new SessionController(request.interventionChannel, {
-        observe: () => surface.observe(0),
-        screenshot: async (label) => recorder.screenshot(await surface.screenshot(), label),
-        record: (type, detail) => recorder.event({ type, detail }),
-      })
-    : undefined;
 
   const recorded: RecordedStep[] = [];
   const messages: Anthropic.MessageParam[] = [];
   let modelCalls = 0;
 
   try {
+    // Launching happens inside the guarded lifecycle. A missing browser binary — or a custom
+    // surface factory that rejects — is exactly what a caller must receive as a structured
+    // result rather than an unhandled rejection. replay() was fixed for this during the PR3
+    // review and discovery was not, which PR11 made more likely to bite by allowing any
+    // factory to be supplied.
+    surface = await launch({
+      ...(request.headed === undefined ? {} : { headed: request.headed }),
+      navigationAllowed: guard.navigationAllowed,
+    });
+    const live = surface;
+
+    const guarded = new GuardedSurface(live, guard, (reason) => {
+      void recorder.event({ type: "policy.denied", detail: { reason } });
+    });
+    guard.begin();
+
+    const controller = request.interventionChannel
+      ? new SessionController(request.interventionChannel, {
+          observe: () => live.observe(0),
+          screenshot: async (label) => recorder.screenshot(await live.screenshot(), label),
+          record: (type, detail) => recorder.event({ type, detail }),
+        })
+      : undefined;
+
     await guarded.navigate(request.baseUrl);
 
     for (let step = 0; step < maxSteps; step++) {
@@ -403,9 +418,17 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
     await recorder.event({ type: "discovery.failed", detail: { reason } });
     return { status: "failed", reason, evidenceDir: recorder.directory, modelCalls };
   } finally {
-    await surface.close();
+    if (surface) {
+      const closed = await closeSurface(surface);
+      if (!closed.ok) {
+        await recorder
+          .event({ type: "surface.teardown_failed", detail: { reason: redact(closed.reason) } })
+          .catch(() => {});
+      }
+    }
   }
 }
+
 
 // ─── Observation rendering ─────────────────────────────────────────────────────
 
