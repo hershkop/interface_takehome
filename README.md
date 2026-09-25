@@ -20,9 +20,30 @@ Requires Node 20+ and Docker.
 npm install
 npm run install:browsers    # downloads Chromium — npm install does NOT do this
 cp .env.example .env        # optional; the defaults work as-is
+./start.sh                  # ParaBank, seeded, plus the operator console
+```
+
+| | |
+|---|---|
+| `./start.sh` | brings ParaBank up, waits for it to be healthy, seeds the fixture data, and starts the console |
+| `./stop.sh` | stops the console and ParaBank, and clears any leftover browser processes |
+| `./logs.sh` | follows ParaBank's logs (`--console` for the console's) |
+
+`./start.sh --no-console` skips the console if you only want the CLI. `./stop.sh --clean` also
+drops ParaBank's volumes. `./logs.sh --help` lists the rest.
+
+Fixture data is re-seeded on every start, deliberately: demo transfers move real money inside
+the container, so balances drift without it. Use `--no-seed` to keep whatever state is there.
+
+<details>
+<summary>The equivalent by hand</summary>
+
+```bash
 docker compose up -d        # starts ParaBank
 npm run setup               # seeds it and prints the demo account IDs
+npm run console             # the operator console
 ```
+</details>
 
 `npm run install:browsers` is not optional and `npm install` will not do it for you: the
 Playwright *package* installs from npm, but the browser binary is a separate download. Without
