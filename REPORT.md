@@ -9,7 +9,7 @@ The whole thesis, demonstrated end to end:
 ```
 $ npm run cli -- discover --goal "Log in, then look up account 12678 and read its balance
                                   and account type" --capability lookup_balance_discovered ...
-  RECORDED  lookup_balance_discovered v1.0.0    steps: 9    model calls: 11
+  RECORDED  lookup_balance_discovered v1.0.0    steps: 8    model calls: 10
 
 $ npm run cli -- replay capabilities/lookup_balance_discovered.v1.json --input accountId=12345
   SUCCESS   balance = -2300   accountType = "CHECKING"   model calls: 0
@@ -60,7 +60,8 @@ building scaling infrastructure is not rewarded, and none of it would change a b
 without touching another file.
 
 Playwright over a CUA/agent SDK: this system's value is the *artifact*, and an agent SDK would
-own the loop that produces it. The 100-line loop in `discovery.ts` is the part worth controlling.
+own the loop that produces it. How each proposed action is validated, policy-checked, risk-gated
+and then recorded as a durable locator is exactly the part worth writing by hand.
 
 Claude Opus 5 with adaptive thinking, tool use, and `disable_parallel_tool_use`. One action per
 turn, because the loop observes between actions — a batch would have the model choosing its
@@ -91,10 +92,15 @@ A capability is declarative JSON validated by a versioned Zod schema (`src/schem
 one visible match*; zero and ambiguous are both refusals. Three identical `Delete` buttons is
 the case that matters — picking the first acts on the wrong record and reports success.
 
-Preference order is a property of the system, not of whoever recorded it: accessible role+name
-→ label → visible text → stable id → structural CSS → coordinates. A coordinate target anywhere
-in an artifact — a step, an output locator, a dismiss handler — blocks `approved` status, and
-the schema enforces it.
+The recommended order is accessible role+name → label → visible text → stable id → structural
+CSS → coordinates, and discovery emits candidates that way. Be clear about what enforces it:
+**the resolver walks the chain in the order the artifact gives**, so the ranking is a convention
+followed by the recorder and by review, not something the engine imposes. A hand-authored
+artifact that lists CSS first will get CSS.
+
+One targeting rule *is* enforced: a coordinate target anywhere in an artifact — a step, an
+output locator, a dismiss handler — blocks `approved` status, checked by schema refinement over
+every target location.
 
 **Handlers make the error taxonomy data, not engine branching.** Each pairs a match condition
 with one of three dispositions:
@@ -149,7 +155,7 @@ discovery and replay now handle all three.
 
 | | |
 |---|---|
-| **No model** | Nothing in `replay.ts` can call one. Every run records `modelCalls`, and tests assert `0` on every path |
+| **No model** | Nothing in `replay.ts` can call one. Every run records `modelCalls`; a test asserts `0` across the success and business-outcome paths, and the count is in every committed replay result |
 | **Declared branches only** | Steps in order, handlers with fixed dispositions, one checkpoint |
 | **Refusal over guessing** | Exactly one visible match, or the run stops |
 | **Waits, never sleeps** | Every wait is on an observable condition with a bounded timeout |
@@ -218,7 +224,7 @@ built.
 
 ### Surface abstraction
 
-Nothing above `surface.ts` mentions Playwright, CSS, or a browser. `Surface` has eleven
+Nothing above `surface.ts` mentions Playwright, CSS, or a browser. `Surface` has twelve
 intent-level methods — *click the control whose accessible name is "Transfer"*, *is this text
 visible*. The seam between "how we perceive and act" and "the recorded flow" is exactly that
 interface.
@@ -233,7 +239,7 @@ That choice paid off in the discovery run: reading roles and names, the model pr
 the two fields that genuinely have no accessible name — exactly the preference order the schema
 wants.
 
-**A desktop adapter** implements the same eleven methods over OS accessibility APIs. The
+**A desktop adapter** implements the same twelve methods over OS accessibility APIs. The
 observation it produces is the same shape, and locator candidates are a discriminated union, so
 a surface-specific strategy is additive rather than a schema change. A *legacy* web app needs no
 adapter at all — ParaBank is server-rendered JSP with framesets' worth of nested tables and no
@@ -357,8 +363,10 @@ Enforcement is **three layers**, because no one of them covers the ground:
 2. **A browser-level navigation guard.** Aborts document requests to origins outside the
    allowlist. The engine is told "click this link", not where the link goes; a refused
    navigation is `POLICY_DENIED` even when the click succeeded.
-3. **A landing check after every action.** A single-page app routes with `history.pushState()`
-   and issues no document request, so the network guard never sees it.
+3. **A landing check after every mutating action** (`navigate`, `click`, `fill`, `select`,
+   `clickAt`). A single-page app routes with `history.pushState()` and issues no document
+   request, so the network guard never sees it. Reads are not re-checked, because they cannot
+   move the session.
 
 Origins are compared exactly and canonically — `bank.test` never matches `bank.test.evil.com`.
 The allowlist parser rejects non-`http(s)` schemes, embedded credentials, and anything carrying
@@ -437,7 +445,7 @@ archive.
 **Remote operator console.** The scope note permits mocking it. The control-transfer *model* is
 real; the surface is a terminal prompt.
 
-**Desktop surface.** Designed for (§4) and not implemented. The eleven-method port is the seam.
+**Desktop surface.** Designed for (§4) and not implemented. The twelve-method port is the seam.
 
 **Multi-tenant machinery.** Schema fields for identity, lineage and drift are present; the
 override resolver, registry and credential store are not — that is the scaling infrastructure

@@ -82,7 +82,7 @@ npm run cli -- discover \
   --capability lookup_balance_discovered \
   --out capabilities/lookup_balance_discovered.v1.json \
   --input accountId=12678
-#   RECORDED  lookup_balance_discovered v1.0.0   steps: 9   model calls: 11
+#   RECORDED  lookup_balance_discovered v1.0.0   steps: 8   model calls: 10
 
 # 2. Replay it with an account the model never saw — no model in the loop
 npm run cli -- replay capabilities/lookup_balance_discovered.v1.json --input accountId=12345
