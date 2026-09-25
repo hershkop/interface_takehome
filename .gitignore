@@ -17,3 +17,5 @@ Assignment A — Computer-Use Automation System.pdf
 evidence/*
 !evidence/.gitkeep
 !evidence/examples/
+.console.pid
+console.log
