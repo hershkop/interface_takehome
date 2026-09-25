@@ -66,7 +66,14 @@ describe("evidence artifacts carry no secrets", () => {
       </form>
       <p>Balance: -$100.00</p>
     `);
-    await recorder.screenshot(page, "login-form");
+    const { PlaywrightSurface } = await import("../src/surface.js");
+    const surface = await PlaywrightSurface.launch();
+    try {
+      await surface.page.goto(`data:text/html,${encodeURIComponent(await page.content())}`);
+      await recorder.screenshot(await surface.screenshot(), "login-form");
+    } finally {
+      await surface.close();
+    }
 
     await recorder.failureSnapshot(
       {
@@ -136,8 +143,17 @@ describe("evidence artifacts carry no secrets", () => {
     });
 
     // A rendered pixel cannot be redacted afterwards, so masking happens at capture time.
-    await page.setContent(`<input type="password" value="visible-secret" style="width:400px" />`);
-    const masked = await recorder.screenshot(page, "masked");
+    const { PlaywrightSurface } = await import("../src/surface.js");
+    const surface = await PlaywrightSurface.launch();
+    let masked: string;
+    try {
+      await surface.page.setContent(
+        `<input type="password" value="visible-secret" style="width:400px" />`,
+      );
+      masked = await recorder.screenshot(await surface.screenshot(), "masked");
+    } finally {
+      await surface.close();
+    }
     const bytes = await readFile(masked);
     expect(bytes.byteLength).toBeGreaterThan(0);
     expect(recorder.summary().screenshots).toContain(masked);

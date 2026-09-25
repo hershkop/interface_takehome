@@ -224,10 +224,27 @@ built.
 
 ### Surface abstraction
 
-Nothing above `surface.ts` mentions Playwright, CSS, or a browser. `Surface` has twelve
-intent-level methods — *click the control whose accessible name is "Transfer"*, *is this text
-visible*. The seam between "how we perceive and act" and "the recorded flow" is exactly that
-interface.
+No type above `surface.ts` is a browser type. `Surface` is fourteen members of intent —
+*click the control whose accessible name is "Transfer"*, *is this text visible* — and `replay()`
+takes a `SurfaceFactory`, so nothing in the step loop, the handlers, policy, the ownership lock
+or evidence knows what it got back. The only remaining mention of Playwright outside
+`surface.ts` is the one line that names the **default** factory.
+
+That is now checked rather than claimed: `test/surface-port.test.ts` replays a capability
+through a hand-rolled state machine with no browser, no DOM and no network, and asserts the same
+result contract. If that test ever needs a change to `replay.ts`, the seam has regressed.
+
+Two things the port had to grow to make it true, both found by writing that test:
+
+- **Screenshots return bytes.** Evidence used to take a Playwright `Page`. Capture — and with
+  it masking — moved into the surface, which is where the knowledge of *which regions are
+  sensitive* actually lives.
+- **A surface declares `locationKind`.** The origin allowlist is defined in http(s) origins, so
+  it can only police a surface whose locations are URLs. A desktop window has a name, not an
+  origin, and policing it with a URL allowlist rejected every location it reported. The surface
+  declares which it is rather than the guard sniffing the string — a surface that quietly
+  returned something unparseable would silently disable a safety check instead of announcing it
+  needs a different one.
 
 Observation is a Playwright **ARIA snapshot** — role and accessible name — chosen because it is
 the one representation a modern web app, a legacy frameset, and a native desktop app can all
@@ -239,7 +256,7 @@ That choice paid off in the discovery run: reading roles and names, the model pr
 the two fields that genuinely have no accessible name — exactly the preference order the schema
 wants.
 
-**A desktop adapter** implements the same twelve methods over OS accessibility APIs. The
+**A desktop adapter** implements the same port over OS accessibility APIs. The
 observation it produces is the same shape, and locator candidates are a discriminated union, so
 a surface-specific strategy is additive rather than a schema change. A *legacy* web app needs no
 adapter at all — ParaBank is server-rendered JSP with framesets' worth of nested tables and no
@@ -455,7 +472,9 @@ archive.
 **Remote operator console.** The scope note permits mocking it. The control-transfer *model* is
 real; the surface is a terminal prompt.
 
-**Desktop surface.** Designed for (§4) and not implemented. The twelve-method port is the seam.
+**Desktop surface.** Designed for (§4) and not implemented, though the port is now proven
+neutral by a non-browser surface in the test suite. An `opaque` surface also needs its own
+containment story: the origin allowlist cannot police one, and nothing replaces it yet.
 
 **Multi-tenant machinery.** Schema fields for identity, lineage and drift are present; the
 override resolver, registry and credential store are not — that is the scaling infrastructure

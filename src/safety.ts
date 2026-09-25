@@ -254,6 +254,11 @@ export class GuardedSurface implements Surface {
    * design claim is about surfaces in general, not about ParaBank.
    */
   private checkLanding(): ActionOutcome | undefined {
+    // A surface whose locations are opaque cannot be policed by an origin allowlist. Skipping
+    // is not a loophole: `checkUrl` still rejects anything non-http on a `url` surface, so a
+    // browser cannot reach `data:` or `javascript:` by claiming to be opaque.
+    if (this.inner.locationKind !== "url") return undefined;
+
     const url = this.inner.currentUrl();
     if (url === "about:blank") return undefined;
     const decision = this.guard.checkUrl(url);
@@ -316,12 +321,21 @@ export class GuardedSurface implements Surface {
     return this.inner.verify(condition);
   }
 
+  get locationKind(): "url" | "opaque" {
+    return this.inner.locationKind;
+  }
+
   currentUrl(): string {
     return this.inner.currentUrl();
   }
 
   takeBlockedNavigations(): string[] {
     return this.inner.takeBlockedNavigations();
+  }
+
+  /** Passed through: capturing evidence is neither a policy decision nor a mutation. */
+  async screenshot(mask?: readonly string[]): Promise<Buffer> {
+    return mask === undefined ? this.inner.screenshot() : this.inner.screenshot(mask);
   }
 
   async clickAt(x: number, y: number): Promise<CoordinateClickOutcome> {

@@ -41,7 +41,12 @@ import {
   type InterventionChannel,
 } from "./handoff.js";
 import { createRedactor, type Redactor } from "./redact.js";
-import { PlaywrightSurface, describeCondition, type Surface } from "./surface.js";
+import {
+  PlaywrightSurface,
+  describeCondition,
+  type Surface,
+  type SurfaceFactory,
+} from "./surface.js";
 import {
   coerce,
   coerceInput,
@@ -67,6 +72,13 @@ export interface ReplayOptions {
   postconditionTimeoutMs?: number;
   /** Point at a specific Chromium build. */
   executablePath?: string;
+  /**
+   * How to obtain a surface. Defaults to a browser.
+   *
+   * This is the seam a non-web surface plugs into. Nothing below it — the step loop, handlers,
+   * policy, the ownership lock, evidence — knows or cares what it got back.
+   */
+  createSurface?: SurfaceFactory;
   /** Watch events as they are recorded. The console streams these to a browser. */
   onEvent?: (event: EvidenceEvent) => void;
   /**
@@ -103,8 +115,7 @@ export interface ReplayOptions {
 interface RunContext {
   /** Policy-guarded. Everything that drives the browser goes through this. */
   surface: Surface;
-  /** The raw surface, used only for evidence capture (screenshots need the Page). */
-  rawSurface: PlaywrightSurface;
+
   recorder: EvidenceRecorder;
   scope: TemplateScope;
   redact: Redactor;
@@ -216,7 +227,7 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
     startedAt: new Date().toISOString(),
   });
 
-  let surface: PlaywrightSurface | undefined;
+  let surface: Surface | undefined;
   let terminal: TerminalOutcome | undefined;
   let outputs: Record<string, unknown> | undefined;
   let controller: SessionController | undefined;
@@ -226,7 +237,8 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
     // Launching is inside the guarded lifecycle. A missing browser binary or a failed context
     // is exactly the kind of thing a caller consuming --json must receive as a structured
     // failure, not as an unhandled rejection.
-    surface = await PlaywrightSurface.launch({
+    const launch: SurfaceFactory = options.createSurface ?? PlaywrightSurface.launch;
+    surface = await launch({
       ...(options.headed === undefined ? {} : { headed: options.headed }),
       trace: options.trace ?? "off",
       traceDir: recorder.directory,
@@ -248,7 +260,7 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
       const live = surface;
       controller = new SessionController(options.interventionChannel, {
         observe: () => live.observe(0),
-        screenshot: (label) => recorder.screenshot(live.page, label),
+        screenshot: async (label) => recorder.screenshot(await live.screenshot(), label),
         record: (type, detail) => recorder.event({ type, detail }),
       });
     }
@@ -265,7 +277,6 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
 
     const context: RunContext = {
       surface: activeSurface,
-      rawSurface: surface,
       recorder,
       redact,
       scope: { baseUrl, inputs: inputs.values, secrets, vars: {} },
@@ -1184,7 +1195,7 @@ function earlyFailure(code: ErrorCode, message: string): RunResult {
 
 async function captureFailureContext(context: RunContext, label: string): Promise<void> {
   try {
-    await context.recorder.screenshot(context.rawSurface.page, `failure-${label}`);
+    await context.recorder.screenshot(await context.surface.screenshot(), `failure-${label}`);
     await context.recorder.failureSnapshot(await context.surface.observe(0), { label });
   } catch {
     // Evidence capture must never be the reason a run reports something other than its

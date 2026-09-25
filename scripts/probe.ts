@@ -84,7 +84,7 @@ async function main(): Promise<void> {
       "reached Accounts Overview",
       await surface.verify(cond({ kind: "title", value: "Accounts Overview" })),
     );
-    await recorder.screenshot(surface.page, "overview");
+    await recorder.screenshot(await surface.screenshot(), "overview");
 
     // ── 2. ARIA snapshot is non-trivial on a JS-rendered page. ──
     const observation = await surface.observe(1);
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
       "absent account shows 'Could not find account'",
       await surface.verify(cond({ kind: "text", value: "Could not find account" })),
     );
-    await recorder.screenshot(surface.page, "account-not-found");
+    await recorder.screenshot(await surface.screenshot(), "account-not-found");
 
     // ── 5. Ambiguity is refused rather than guessed. ──
     const ambiguous = await surface.click(

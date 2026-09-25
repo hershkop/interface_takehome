@@ -13,10 +13,11 @@
  * it can start browser sessions and read the evidence directory, so it must not be exposed.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve as resolvePath, sep } from "node:path";
 import { config, defaultPolicy } from "../config.js";
 import { loadCatalog } from "../catalog.js";
+import { CapabilityArtifact } from "../schema.js";
 import { replay } from "../replay.js";
 import { discover } from "../discovery.js";
 import { loginToParabank } from "../parabank.js";
@@ -86,8 +87,10 @@ async function route(
         path: e.path,
         inputs: e.artifact.inputs,
         outputs: e.artifact.outputs,
+        notes: e.artifact.metadata.notes ?? "",
         stepCount: e.artifact.steps.length,
         handlerCount: e.artifact.handlers.length,
+        artifact: e.artifact,
       })),
       invalid,
     });
@@ -121,6 +124,14 @@ async function route(
     const { decision, reason } = await body(req);
     const answered = registry.answer(id, buildDecision(String(decision), reason));
     return send(res, answered ? 200 : 409, { answered });
+  }
+
+  if (path.startsWith("/api/capabilities/") && req.method === "PUT") {
+    return saveCapability(res, decodeURIComponent(path.slice("/api/capabilities/".length)), await body(req));
+  }
+
+  if (path.startsWith("/api/capabilities/") && req.method === "DELETE") {
+    return deleteCapability(res, decodeURIComponent(path.slice("/api/capabilities/".length)));
   }
 
   if (path.startsWith("/evidence/")) {
@@ -226,6 +237,79 @@ function buildDecision(decision: string, reason: unknown) {
     decision: "abort" as const,
     ...(typeof reason === "string" && reason ? { reason } : {}),
   };
+}
+
+
+// ─── Editing and deleting capabilities ─────────────────────────────────────────
+
+/**
+ * Finds a capability's file by its id rather than building a path from the URL.
+ *
+ * The id reaches us from a URL and ends up naming a file, so it is never concatenated into a
+ * path. The catalog already knows where each artifact lives; looking the entry up means a
+ * crafted id matches nothing instead of escaping the directory.
+ */
+async function locate(capabilityId: string) {
+  const { entries } = await loadCatalog(CAPABILITIES_DIR);
+  return entries.find((e) => e.capabilityId === capabilityId);
+}
+
+/**
+ * Replaces an artifact, but only with something that still validates.
+ *
+ * The console is where a reviewer promotes a draft, and an editor that can save a broken
+ * capability turns review into a way to break things. The same Zod schema replay uses is the
+ * gate, and its issues come back to the editor verbatim so a mistake is legible.
+ */
+async function saveCapability(
+  res: ServerResponse,
+  capabilityId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const entry = await locate(capabilityId);
+  if (!entry) return send(res, 404, { error: `no capability "${capabilityId}"` });
+
+  const parsed = CapabilityArtifact.safeParse(payload.artifact);
+  if (!parsed.success) {
+    return send(res, 422, {
+      error: "the edited artifact does not validate",
+      issues: parsed.error.issues.map((i) => ({
+        path: i.path.join(".") || "(root)",
+        message: i.message,
+      })),
+    });
+  }
+
+  // Renaming a capability would orphan the file it was loaded from and could collide with
+  // another; rename is a separate operation and is not offered here.
+  if (parsed.data.capabilityId !== capabilityId) {
+    return send(res, 409, {
+      error: `capabilityId cannot be changed here (was "${capabilityId}", got "${parsed.data.capabilityId}")`,
+    });
+  }
+
+  await writeFile(entry.path, `${JSON.stringify(parsed.data, null, 2)}\n`, "utf8");
+  send(res, 200, { saved: entry.path, status: parsed.data.metadata.status });
+}
+
+/**
+ * Deletes by moving to `capabilities/.trash/`, not by unlinking.
+ *
+ * A discovered capability can represent a real model run that has not been committed yet, and
+ * the console offers deletion one click behind a confirmation. Making it recoverable costs a
+ * rename; making it irreversible costs someone their run.
+ */
+async function deleteCapability(res: ServerResponse, capabilityId: string): Promise<void> {
+  const entry = await locate(capabilityId);
+  if (!entry) return send(res, 404, { error: `no capability "${capabilityId}"` });
+
+  const trash = join(CAPABILITIES_DIR, ".trash");
+  await mkdir(trash, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const destination = join(trash, `${capabilityId}.${stamp}.json`);
+
+  await rename(entry.path, destination);
+  send(res, 200, { deleted: entry.path, recoverableAt: destination });
 }
 
 // ─── Transport helpers ─────────────────────────────────────────────────────────

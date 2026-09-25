@@ -391,6 +391,15 @@ export const CapabilityArtifact = z
       recordedBy: z.enum(["llm", "human"]),
       /** Present when recordedBy === "llm". Kept for provenance, not for replay. */
       model: z.string().optional(),
+      /**
+       * A reviewer's free-text note.
+       *
+       * Lives on the artifact rather than in a sidecar because the brief asks for artifacts to
+       * be *reviewable*, and the reason someone approved a draft — or refused to — is part of
+       * what a later reader needs. It travels with the capability and is versioned by git.
+       * Never used for control flow.
+       */
+      notes: z.string().max(4000).optional(),
     }),
 
     target: z.object({
