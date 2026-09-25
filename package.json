@@ -13,7 +13,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "probe": "tsx scripts/probe.ts",
-    "install:browsers": "playwright install chromium"
+    "install:browsers": "playwright install chromium",
+    "console": "tsx src/console/index.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",

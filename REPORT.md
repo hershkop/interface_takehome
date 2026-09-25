@@ -342,8 +342,18 @@ log.
 
 ### The seam, and what is mocked
 
-`CliInterventionChannel` is openly a stand-in — a real deployment routes to a queue and streams
-the session to a remote console. Swapping it for a queue consumer changes no other file.
+`InterventionChannel` is a one-method interface with three implementations: a terminal prompt,
+a scripted one for tests, and a **web operator console** (`npm run console`). The console was
+built after the fact specifically to test the claim that swapping the operator surface changes
+nothing else — and it held: `replay.ts`, `handoff.ts` and `discovery.ts` are untouched by it.
+The only addition elsewhere was an optional `onEvent` hook on the evidence recorder so a run can
+be watched in flight.
+
+What remains mocked is **co-browsing**. The console shows an operator why a run stopped and what
+the screen looked like, and takes their decision; they then act in the real application's
+browser window. A production deployment would stream that session to them instead. The
+control-transfer model does not change either way — which is the point of putting it behind an
+interface.
 
 Not a stand-in: ownership genuinely transfers on the same live session, the lock is enforced
 rather than advised, the request carries enough context to act on, the human's actions are
