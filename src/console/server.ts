@@ -13,11 +13,13 @@
  * it can start browser sessions and read the evidence directory, so it must not be exposed.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve as resolvePath, sep } from "node:path";
 import { config, defaultPolicy } from "../config.js";
 import { loadCatalog } from "../catalog.js";
 import { CapabilityArtifact } from "../schema.js";
+import { createRedactor } from "../redact.js";
+import { isSensitiveSecretKey } from "../template.js";
 import { replay } from "../replay.js";
 import { discover } from "../discovery.js";
 import { loginToParabank } from "../parabank.js";
@@ -288,8 +290,34 @@ async function saveCapability(
     });
   }
 
-  await writeFile(entry.path, `${JSON.stringify(parsed.data, null, 2)}\n`, "utf8");
-  send(res, 200, { saved: entry.path, status: parsed.data.metadata.status });
+  // A reviewer note is free text a human pasted in, which makes it the likeliest place for a
+  // credential or an SSN to enter a git-versioned artifact. It is the one field here that has
+  // not already been through the redaction boundary, so it goes through it now. The rest of the
+  // artifact is left alone: redacting a locator would corrupt it.
+  const redact = createRedactor({
+    literals: Object.entries({
+      parabankUsername: config.parabank.username,
+      parabankPassword: config.parabank.password,
+    })
+      .filter(([key]) => isSensitiveSecretKey(key))
+      .map(([, value]) => value),
+  });
+
+  const artifact = parsed.data;
+  const submittedNote = artifact.metadata.notes;
+  if (submittedNote) {
+    artifact.metadata.notes = redact(submittedNote);
+  }
+  // Captured before the mutation: `artifact` IS `parsed.data`, so comparing them afterwards
+  // always says nothing changed. A reviewer whose note was altered has to be told.
+  const notesRedacted = submittedNote !== undefined && artifact.metadata.notes !== submittedNote;
+
+  await writeAtomically(entry.path, `${JSON.stringify(artifact, null, 2)}\n`);
+  send(res, 200, {
+    saved: entry.path,
+    status: artifact.metadata.status,
+    ...(notesRedacted ? { notesRedacted: true } : {}),
+  });
 }
 
 /**
@@ -310,6 +338,26 @@ async function deleteCapability(res: ServerResponse, capabilityId: string): Prom
 
   await rename(entry.path, destination);
   send(res, 200, { deleted: entry.path, recoverableAt: destination });
+}
+
+
+/**
+ * Writes via a temporary file in the same directory, then renames over the target.
+ *
+ * `writeFile` truncates before it writes, so a crash — or a catalog read, which happens on
+ * every console request — can see a half-written artifact. Rename within a directory is atomic,
+ * so a reader sees either the old file or the new one and never a partial one. The temp file is
+ * cleaned up if the rename fails, rather than left as debris beside the real artifact.
+ */
+async function writeAtomically(target: string, contents: string): Promise<void> {
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await writeFile(temporary, contents, "utf8");
+    await rename(temporary, target);
+  } catch (err) {
+    await unlink(temporary).catch(() => {});
+    throw err;
+  }
 }
 
 // ─── Transport helpers ─────────────────────────────────────────────────────────

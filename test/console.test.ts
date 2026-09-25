@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { readFile, readdir } from "node:fs/promises";
 import { RunRegistry, WebInterventionChannel } from "../src/console/runs.js";
 import { startConsole } from "../src/console/server.js";
 import type { InterventionRequest } from "../src/schema.js";
@@ -251,4 +252,82 @@ describe("capability management", () => {
       expect(put.status, `PUT ${id}`).toBe(404);
     }
   });
+});
+
+describe("saving an artifact is safe (PR10 review #2, #3)", () => {
+  let stop: (() => Promise<void>) | undefined;
+  const start = async () => {
+    const started = await startConsole({ port: 0, host: "127.0.0.1" });
+    stop = started.close;
+    return started.url;
+  };
+  afterEach(async () => {
+    await stop?.();
+    stop = undefined;
+  });
+
+  it("redacts sensitive content out of a reviewer note before it is written", async () => {
+    // A note is free text a human pasted in, which makes it the likeliest place for a
+    // credential to enter a git-versioned artifact. It is the one field that had not been
+    // through the redaction boundary.
+    const url = await start();
+    const { capabilities } = await (await fetch(`${url}/api/capabilities`)).json();
+    const target = capabilities.find((c: { status: string }) => c.status === "draft") ?? capabilities[0];
+    if (!target) return;
+
+    const original = structuredClone(target.artifact);
+    const edited = structuredClone(target.artifact);
+    edited.metadata.notes =
+      "SSN 123-45-6789, token sk-ant-api03-SHOULDNOTPERSIST, card 4111111111111111, account 12345";
+
+    try {
+      const res = await fetch(`${url}/api/capabilities/${target.capabilityId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ artifact: edited }),
+      });
+      const payload = await res.json();
+      expect(res.status).toBe(200);
+      // The reviewer is told their text was altered rather than it happening silently.
+      expect(payload.notesRedacted).toBe(true);
+
+      const saved = await readFile(target.path, "utf8");
+      expect(saved).not.toContain("123-45-6789");
+      expect(saved).not.toContain("sk-ant-api03-SHOULDNOTPERSIST");
+      expect(saved).not.toContain("4111111111111111");
+      // The account number is the subject of the work, not a regulated identifier.
+      expect(saved).toContain("12345");
+    } finally {
+      await fetch(`${url}/api/capabilities/${target.capabilityId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ artifact: original }),
+      });
+    }
+  }, 30_000);
+
+  it("leaves no partial file behind when a save fails", async () => {
+    // writeFile truncates before it writes, and the catalog is read on every console request.
+    // A rejected save must not have touched the artifact at all.
+    const url = await start();
+    const { capabilities } = await (await fetch(`${url}/api/capabilities`)).json();
+    const target = capabilities[0];
+    if (!target) return;
+
+    const before = await readFile(target.path, "utf8");
+
+    const broken = structuredClone(target.artifact);
+    delete broken.metadata.risk;
+    const res = await fetch(`${url}/api/capabilities/${target.capabilityId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifact: broken }),
+    });
+    expect(res.status).toBe(422);
+
+    expect(await readFile(target.path, "utf8")).toBe(before);
+    // And no temp debris beside the real artifact.
+    const siblings = await readdir("capabilities");
+    expect(siblings.filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  }, 30_000);
 });
