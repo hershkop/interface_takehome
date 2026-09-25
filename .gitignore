@@ -19,3 +19,4 @@ evidence/*
 !evidence/examples/
 .console.pid
 console.log
+capabilities/.trash/

@@ -66,6 +66,20 @@
   .note { font-size: 12px; color: var(--dim); margin-top: 8px; }
   .empty { color: var(--dim); font-size: 13px; padding: 4px 0; }
   .err { color: var(--bad); font-size: 12.5px; margin-top: 6px; }
+  .ok { color: var(--ok); font-size: 12.5px; margin-top: 6px; }
+  .search { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .search input { flex: 1; }
+  .count { font-size: 12px; color: var(--dim); white-space: nowrap; }
+  .notes { font-size: 12.5px; color: var(--ink); background: #0e1016; border: 1px solid var(--line);
+           border-left: 2px solid var(--accent); border-radius: 0 6px 6px 0; padding: 7px 10px;
+           margin: 0 0 8px; white-space: pre-wrap; }
+  .editor { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .editor textarea { min-height: 260px; font-family: ui-monospace, monospace; font-size: 11.5px; }
+  .issues { margin-top: 6px; font-family: ui-monospace, monospace; font-size: 11.5px; }
+  .issues div { color: var(--bad); }
+  .confirm { border: 1px solid var(--bad); border-radius: 6px; padding: 10px 12px; margin-top: 10px;
+             background: #1f1214; }
+  .confirm p { margin: 0 0 8px; font-size: 12.5px; }
 </style>
 
 <header>
@@ -82,7 +96,13 @@
 
     <section style="margin-top:16px">
       <h2>Capabilities</h2>
-      <div class="body" id="caps"><div class="empty">loading…</div></div>
+      <div class="body">
+        <div class="search">
+          <input id="filter" placeholder="filter by id, name, description, status or risk…" />
+          <span class="count" id="count"></span>
+        </div>
+        <div id="caps"><div class="empty">loading…</div></div>
+      </div>
     </section>
 
     <section style="margin-top:16px">
@@ -120,20 +140,53 @@
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
   // ── Capabilities ───────────────────────────────────────────────────────────
+  let invalidEntries = [];
+  const open = new Set();      // capability ids whose editor is expanded
+  const confirming = new Set(); // capability ids awaiting delete confirmation
+
   async function loadCapabilities() {
     const { capabilities: list, invalid } = await (await fetch("/api/capabilities")).json();
     capabilities = list;
+    invalidEntries = invalid;
+    renderCapabilities();
+  }
+
+  /** Matches across every field someone might remember a capability by. */
+  function matches(c, query) {
+    if (!query) return true;
+    return [c.capabilityId, c.name, c.description, c.status, c.risk, c.notes]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(query);
+  }
+
+  function renderCapabilities() {
+    const query = $("filter").value.trim().toLowerCase();
+    const shown = capabilities.filter((c) => matches(c, query));
+
+    $("count").textContent = query
+      ? `${shown.length} of ${capabilities.length}`
+      : `${capabilities.length}`;
+
     $("caps").innerHTML =
-      (list.length ? "" : '<div class="empty">no capabilities in capabilities/</div>') +
-      list.map(renderCapability).join("") +
-      invalid.map((i) => `<div class="err">invalid: ${esc(i.path)} — ${esc(i.reason)}</div>`).join("");
+      (capabilities.length === 0
+        ? '<div class="empty">no capabilities in capabilities/</div>'
+        : shown.length === 0
+          ? `<div class="empty">nothing matches “${esc(query)}”</div>`
+          : "") +
+      shown.map(renderCapability).join("") +
+      invalidEntries
+        .map((i) => `<div class="err">invalid: ${esc(i.path)} — ${esc(i.reason)}</div>`)
+        .join("");
   }
 
   function renderCapability(c) {
+    const id = c.capabilityId;
     const ins = Object.entries(c.inputs);
     return `
       <div class="cap">
-        <h3>${esc(c.capabilityId)}</h3>
+        <h3>${esc(id)}</h3>
         <div class="tags">
           <span class="tag ${c.status}">${esc(c.status)}</span>
           <span class="tag${c.risk === "safe" ? "" : " risk"}">risk: ${esc(c.risk)}</span>
@@ -142,30 +195,149 @@
           <span class="tag">${c.handlerCount} handlers</span>
         </div>
         <p>${esc(c.description)}</p>
+        ${c.notes ? `<div class="notes">${esc(c.notes)}</div>` : ""}
         ${ins.map(([n, d]) => `
           <label>${esc(n)} <span style="opacity:.6">(${esc(d.type)}${d.required === false ? ", optional" : ""})</span></label>
-          <input data-cap="${esc(c.capabilityId)}" data-input="${esc(n)}" placeholder="${esc(d.description ?? "")}" />
+          <input data-cap="${esc(id)}" data-input="${esc(n)}" placeholder="${esc(d.description ?? "")}" />
         `).join("")}
         <div class="actions">
-          <button class="primary" data-replay="${esc(c.capabilityId)}">Replay</button>
+          <button class="primary" data-replay="${esc(id)}">Replay</button>
+          <button data-edit="${esc(id)}">${open.has(id) ? "Close" : "Edit"}</button>
+          <button class="danger" data-delete="${esc(id)}">Delete</button>
+        </div>
+        ${confirming.has(id) ? renderConfirm(c) : ""}
+        ${open.has(id) ? renderEditor(c) : ""}
+      </div>`;
+  }
+
+  function renderConfirm(c) {
+    return `
+      <div class="confirm">
+        <p><strong>Delete ${esc(c.capabilityId)}?</strong> It moves to
+          <code>capabilities/.trash/</code>, so it can be recovered — but any agent calling it
+          by name will stop working.</p>
+        <div class="actions">
+          <button class="danger" data-delete-confirm="${esc(c.capabilityId)}">Yes, delete it</button>
+          <button data-delete-cancel="${esc(c.capabilityId)}">Cancel</button>
         </div>
       </div>`;
   }
 
-  $("caps").addEventListener("click", async (e) => {
-    const id = e.target.dataset?.replay;
-    if (!id) return;
-    const inputs = {};
-    document.querySelectorAll(`[data-cap="${CSS.escape(id)}"]`).forEach((el) => {
-      if (el.value.trim()) inputs[el.dataset.input] = el.value.trim();
-    });
-    e.target.disabled = true;
-    await fetch("/api/replay", {
-      method: "POST",
+  function renderEditor(c) {
+    const draft = c.status === "draft";
+    return `
+      <div class="editor">
+        <label>Reviewer note</label>
+        <textarea data-notes="${esc(c.capabilityId)}" style="min-height:52px"
+          placeholder="Why this was approved, what still needs handlers, anything a later reader needs.">${esc(c.notes ?? "")}</textarea>
+        <div class="actions">
+          <button data-save-notes="${esc(c.capabilityId)}">Save note</button>
+          <button ${draft ? 'class="primary"' : ""} data-toggle-status="${esc(c.capabilityId)}">
+            ${draft ? "Approve for unattended use" : "Return to draft"}
+          </button>
+        </div>
+        <label style="margin-top:12px">Full artifact — validated against the schema on save</label>
+        <textarea data-json="${esc(c.capabilityId)}">${esc(JSON.stringify(c.artifact, null, 2))}</textarea>
+        <div class="actions">
+          <button class="primary" data-save-json="${esc(c.capabilityId)}">Save artifact</button>
+        </div>
+        <div class="issues" data-issues="${esc(c.capabilityId)}"></div>
+      </div>`;
+  }
+
+  /** Every write goes through one place, so validation errors are reported the same way. */
+  async function saveArtifact(id, artifact, issuesEl) {
+    const res = await fetch(`/api/capabilities/${encodeURIComponent(id)}`, {
+      method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ capabilityId: id, inputs, headed: true }),
+      body: JSON.stringify({ artifact }),
     });
-    e.target.disabled = false;
+    const payload = await res.json();
+    if (res.ok) {
+      if (issuesEl) issuesEl.innerHTML = `<div class="ok">saved — ${esc(payload.saved)}</div>`;
+      await loadCapabilities();
+      return true;
+    }
+    if (issuesEl) {
+      issuesEl.innerHTML =
+        `<div>${esc(payload.error)}</div>` +
+        (payload.issues ?? []).map((i) => `<div>${esc(i.path)}: ${esc(i.message)}</div>`).join("");
+    }
+    return false;
+  }
+
+  $("filter").addEventListener("input", renderCapabilities);
+
+  $("caps").addEventListener("click", async (e) => {
+    const d = e.target.dataset ?? {};
+    const find = (id) => capabilities.find((c) => c.capabilityId === id);
+
+    if (d.replay) {
+      const inputs = {};
+      document.querySelectorAll(`[data-cap="${CSS.escape(d.replay)}"]`).forEach((el) => {
+        if (el.value.trim()) inputs[el.dataset.input] = el.value.trim();
+      });
+      e.target.disabled = true;
+      await fetch("/api/replay", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ capabilityId: d.replay, inputs, headed: true }),
+      });
+      e.target.disabled = false;
+      return;
+    }
+
+    if (d.edit) {
+      open.has(d.edit) ? open.delete(d.edit) : open.add(d.edit);
+      renderCapabilities();
+      return;
+    }
+
+    // Delete is two clicks, and the second one is the only one that does anything.
+    if (d.delete) { confirming.add(d.delete); renderCapabilities(); return; }
+    if (d.deleteCancel) { confirming.delete(d.deleteCancel); renderCapabilities(); return; }
+
+    if (d.deleteConfirm) {
+      confirming.delete(d.deleteConfirm);
+      open.delete(d.deleteConfirm);
+      await fetch(`/api/capabilities/${encodeURIComponent(d.deleteConfirm)}`, { method: "DELETE" });
+      await loadCapabilities();
+      return;
+    }
+
+    if (d.saveNotes) {
+      const c = find(d.saveNotes);
+      const text = document.querySelector(`[data-notes="${CSS.escape(d.saveNotes)}"]`).value;
+      const artifact = structuredClone(c.artifact);
+      // An empty note removes the field rather than storing "".
+      if (text.trim()) artifact.metadata.notes = text.trim();
+      else delete artifact.metadata.notes;
+      await saveArtifact(d.saveNotes, artifact,
+        document.querySelector(`[data-issues="${CSS.escape(d.saveNotes)}"]`));
+      return;
+    }
+
+    if (d.toggleStatus) {
+      const c = find(d.toggleStatus);
+      const artifact = structuredClone(c.artifact);
+      artifact.metadata.status = c.status === "draft" ? "approved" : "draft";
+      await saveArtifact(d.toggleStatus, artifact,
+        document.querySelector(`[data-issues="${CSS.escape(d.toggleStatus)}"]`));
+      return;
+    }
+
+    if (d.saveJson) {
+      const issues = document.querySelector(`[data-issues="${CSS.escape(d.saveJson)}"]`);
+      const raw = document.querySelector(`[data-json="${CSS.escape(d.saveJson)}"]`).value;
+      let artifact;
+      try {
+        artifact = JSON.parse(raw);
+      } catch (err) {
+        issues.innerHTML = `<div>not valid JSON: ${esc(err.message)}</div>`;
+        return;
+      }
+      await saveArtifact(d.saveJson, artifact, issues);
+    }
   });
 
   // ── Discovery ──────────────────────────────────────────────────────────────
