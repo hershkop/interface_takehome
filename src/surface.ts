@@ -11,6 +11,15 @@
  * representation a browser, a legacy frameset, and a native desktop app can all produce.
  */
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
+
+/**
+ * Masked in every screenshot unless a caller overrides. Password inputs first, plus an opt-in
+ * hook (`data-sensitive`) for anything an artifact author knows is regulated on a given screen.
+ */
+export const DEFAULT_MASK_SELECTORS: readonly string[] = [
+  'input[type="password"]',
+  "[data-sensitive]",
+];
 import { join } from "node:path";
 import type { Condition, Observation } from "./schema.js";
 import { resolveTarget, explainFailure, type AttemptLog } from "./locator.js";
@@ -62,8 +71,30 @@ export interface Surface {
   clickAt(x: number, y: number): Promise<CoordinateClickOutcome>;
   verify(condition: Condition): Promise<boolean>;
   currentUrl(): string;
+  /**
+   * Whether `currentUrl()` is a navigable web location or an opaque identifier.
+   *
+   * The origin allowlist is defined in terms of http(s) origins, so it can only police a
+   * surface whose locations are URLs. A desktop window has a name, not an origin — policing it
+   * with a URL allowlist would reject every location it ever reports.
+   *
+   * Declared by the surface rather than sniffed from the string, because "does this need an
+   * origin check" is a fact about the technology, and a surface that quietly returned something
+   * unparseable would silently disable a safety check instead of announcing it needs a
+   * different one. An `opaque` surface needs its own containment story — see REPORT.md §4.
+   */
+  readonly locationKind: "url" | "opaque";
   /** URLs the navigation guard refused since this was last called. */
   takeBlockedNavigations(): string[];
+  /**
+   * The screen, as bytes, with sensitive regions already masked.
+   *
+   * Masking belongs here rather than in the evidence recorder: *which* regions are sensitive is
+   * a fact about how this surface is perceived — CSS selectors on a page, accessibility roles
+   * on a desktop — and a rendered pixel cannot be redacted after the fact. Returning bytes
+   * rather than taking a Page is what lets anything above this file stay technology-neutral.
+   */
+  screenshot(mask?: readonly string[]): Promise<Buffer>;
   /** Returns the trace path when tracing was enabled, so the caller can record it. */
   close(): Promise<string | undefined>;
 }
@@ -171,46 +202,27 @@ export function describeCondition(condition: Condition): string {
 
 // ─── Playwright implementation ─────────────────────────────────────────────────
 
-export interface PlaywrightSurfaceOptions {
+/**
+ * What any surface can be asked for at launch.
+ *
+ * A superset, deliberately: an adapter ignores what does not apply to it. A desktop surface has
+ * no navigation to guard and no trace to write, and that is fine — the alternative is a lowest
+ * common denominator that makes the browser adapter awkward for no gain.
+ */
+export interface SurfaceLaunchOptions {
   headed?: boolean;
-  /**
-   * Where to write a Playwright trace. Tracing is OFF unless `trace` is also set to
-   * "unredacted", because a trace is a sink the redactor cannot reach into.
-   */
-  traceDir?: string;
-  /**
-   * "off" (default) or "unredacted".
-   *
-   * A Playwright trace archives request bodies, response bodies, cookies, and serialised DOM
-   * snapshots. On this target that demonstrably includes `username=john&password=demo`, the
-   * JSESSIONID cookie, customer names, and account balances. Redaction in this system happens
-   * at the evidence sink, and there is no sink to intercept inside a zip archive — so a trace
-   * cannot be made safe by the mechanism everything else relies on.
-   *
-   * Rather than pretend otherwise, tracing is opt-in, the caller is warned, and the run record
-   * carries `traceUnredacted: true`. The default rich failure signal is the redacted ARIA
-   * snapshot written by EvidenceRecorder.failureSnapshot(), which satisfies the same need
-   * without persisting credentials.
-   */
-  trace?: "off" | "unredacted";
   defaultTimeoutMs?: number;
-  /** Point at a specific Chromium build (a system browser, or a pinned one in CI). */
-  executablePath?: string;
-  /**
-   * Gate on document navigation, enforced in the browser rather than checked afterwards.
-   *
-   * Returning false aborts the request, so the page never loads. This is the only layer that
-   * can stop a navigation the engine did not initiate — a click on an off-site link, a
-   * server-side redirect, a meta refresh — because by the time the engine could inspect the
-   * URL, the browser would already have fetched it.
-   */
   navigationAllowed?: (url: string) => boolean;
-  /**
-   * Called for every user interaction in the page, so a human's actions during a handoff can be
-   * recorded. Values are never included — see the payload assembled in `installHumanEventCapture`.
-   */
   onHumanEvent?: (event: RawHumanEvent) => void;
+  traceDir?: string;
+  trace?: "off" | "unredacted";
+  executablePath?: string;
 }
+
+/** How a caller obtains a surface without naming an implementation. */
+export type SurfaceFactory = (options: SurfaceLaunchOptions) => Promise<Surface>;
+
+export interface PlaywrightSurfaceOptions extends SurfaceLaunchOptions {}
 
 /** Shape emitted by the in-page listeners. Deliberately free of typed content. */
 export interface RawHumanEvent {
@@ -302,6 +314,15 @@ export class PlaywrightSurface implements Surface {
    * smaller than the DOM, and it names controls the way the recorded locators do — so a model
    * reading it naturally proposes role+name targeting rather than brittle CSS.
    */
+  /** Masks at capture time; there is no "after the fact" for a rendered pixel. */
+  async screenshot(mask: readonly string[] = DEFAULT_MASK_SELECTORS): Promise<Buffer> {
+    return this.page.screenshot({
+      fullPage: true,
+      mask: mask.map((selector) => this.page.locator(selector)),
+      maskColor: "#000000",
+    });
+  }
+
   async observe(step: number): Promise<Observation> {
     const [url, title, ariaSnapshot] = await Promise.all([
       Promise.resolve(this.page.url()),
@@ -392,6 +413,8 @@ export class PlaywrightSurface implements Surface {
   async verify(condition: Condition): Promise<boolean> {
     return evaluateCondition(this.page, condition);
   }
+
+  readonly locationKind = "url" as const;
 
   currentUrl(): string {
     return this.page.url();

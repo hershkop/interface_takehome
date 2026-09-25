@@ -36,7 +36,7 @@ import { EvidenceRecorder, newRunId, type EvidenceEvent } from "./evidence.js";
 import { SessionController, type InterventionChannel } from "./handoff.js";
 import { createRedactor } from "./redact.js";
 import { GuardedSurface, PolicyGuard } from "./safety.js";
-import { PlaywrightSurface, describeCondition } from "./surface.js";
+import { PlaywrightSurface, describeCondition, type SurfaceFactory } from "./surface.js";
 import { isSensitiveSecretKey, resolveTemplate, type TemplateScope } from "./template.js";
 
 const MODEL = "claude-opus-5";
@@ -58,6 +58,8 @@ export interface DiscoveryRequest {
   interventionChannel?: InterventionChannel;
   /** Watch events as they are recorded. The console streams these to a browser. */
   onEvent?: (event: EvidenceEvent) => void;
+  /** How to obtain a surface. Defaults to a browser. The seam a desktop adapter plugs into. */
+  createSurface?: SurfaceFactory;
   headed?: boolean;
   evidenceRoot?: string;
   apiKey: string;
@@ -215,7 +217,8 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
   const anthropic = new Anthropic({ apiKey: request.apiKey });
   const maxSteps = Math.min(request.maxSteps ?? 25, request.policy.maxSteps);
 
-  const surface = await PlaywrightSurface.launch({
+  const launch: SurfaceFactory = request.createSurface ?? PlaywrightSurface.launch;
+  const surface = await launch({
     ...(request.headed === undefined ? {} : { headed: request.headed }),
     navigationAllowed: guard.navigationAllowed,
   });
@@ -227,7 +230,7 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
   const controller = request.interventionChannel
     ? new SessionController(request.interventionChannel, {
         observe: () => surface.observe(0),
-        screenshot: (label) => recorder.screenshot(surface.page, label),
+        screenshot: async (label) => recorder.screenshot(await surface.screenshot(), label),
         record: (type, detail) => recorder.event({ type, detail }),
       })
     : undefined;
@@ -241,7 +244,7 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
 
     for (let step = 0; step < maxSteps; step++) {
       const observation = await surface.observe(step);
-      await recorder.screenshot(surface.page, `step-${String(step).padStart(2, "0")}`);
+      await recorder.screenshot(await surface.screenshot(), `step-${String(step).padStart(2, "0")}`);
       await recorder.event({
         type: "observe",
         stepIndex: step,

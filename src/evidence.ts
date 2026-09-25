@@ -11,20 +11,10 @@
  */
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Page } from "playwright";
 import type { EvidenceSummary, Observation, RunResult } from "./schema.js";
 import { redactDeep, type Redactor } from "./redact.js";
 
 export type RunPhase = "discovery" | "replay" | "human";
-
-/**
- * Masked in every screenshot unless a caller overrides. Password inputs first, plus an opt-in
- * hook (`data-sensitive`) for anything an artifact author knows is regulated on a given screen.
- */
-export const DEFAULT_MASK_SELECTORS: readonly string[] = [
-  'input[type="password"]',
-  "[data-sensitive]",
-];
 
 export interface EvidenceEvent {
   timestamp: string;
@@ -104,31 +94,22 @@ export class EvidenceRecorder {
   }
 
   /**
-   * Full-page screenshot, with sensitive regions masked out before the image is written.
+   * Writes an already-masked image.
    *
-   * A screenshot is a sink the string redactor cannot reach: whatever is on screen is in the
-   * file. Masking is therefore done at capture time by Playwright, not after the fact — there
-   * is no "after the fact" for a rendered pixel.
+   * The recorder does not capture the screen, because capturing it means knowing what a
+   * "screen" is. Masking happens at capture time inside the surface, where the knowledge of
+   * which regions are sensitive lives — a screenshot is a sink the string redactor cannot
+   * reach, and there is no "after the fact" for a rendered pixel.
    *
    * Named with a monotonic sequence so files sort in execution order even when several share
    * a step.
    */
-  async screenshot(
-    page: Page,
-    label: string,
-    options: { mask?: readonly string[] } = {},
-  ): Promise<string> {
+  async screenshot(image: Buffer, label: string): Promise<string> {
     await this.ready;
     const seq = String(++this.screenshotSeq).padStart(3, "0");
     const safeLabel = label.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 60);
     const path = join(this.directory, `${seq}-${safeLabel}.png`);
-    const selectors = options.mask ?? DEFAULT_MASK_SELECTORS;
-    await page.screenshot({
-      path,
-      fullPage: true,
-      mask: selectors.map((selector) => page.locator(selector)),
-      maskColor: "#000000",
-    });
+    await writeFile(path, image);
     this.screenshots.push(path);
     return path;
   }

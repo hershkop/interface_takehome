@@ -245,12 +245,21 @@ export class OwnedSurface implements Surface {
     return this.inner.verify(condition);
   }
 
+  get locationKind(): "url" | "opaque" {
+    return this.inner.locationKind;
+  }
+
   currentUrl(): string {
     return this.inner.currentUrl();
   }
 
   takeBlockedNavigations(): string[] {
     return this.inner.takeBlockedNavigations();
+  }
+
+  /** Passed through: capturing evidence is neither a policy decision nor a mutation. */
+  async screenshot(mask?: readonly string[]): Promise<Buffer> {
+    return mask === undefined ? this.inner.screenshot() : this.inner.screenshot(mask);
   }
 
   async observe(step: number): Promise<Observation> {
