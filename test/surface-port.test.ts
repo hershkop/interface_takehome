@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replay } from "../src/replay.js";
@@ -242,6 +242,102 @@ describe("the Surface port is technology-neutral", () => {
         expect(result.error.code).toBe("TARGET_NOT_FOUND");
         expect(result.error.step?.id).toBe("open_account");
       }
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+describe("setup and teardown stay inside the result contract (PR11 review)", () => {
+  const policy = () => Policy.parse({ allowedOrigins: ["http://app.test"] });
+
+  it("turns a rejecting surface factory into a structured failure", async () => {
+    // A caller consuming --json must never receive an unhandled rejection, and a custom
+    // factory is now a thing that can reject.
+    const evidenceRoot = await mkdtemp(join(tmpdir(), "port-"));
+    try {
+      const result = await replay({
+        artifact,
+        inputs: { accountId: "12345" },
+        secrets: { user: "operator" },
+        policy: policy(),
+        evidenceRoot,
+        createSurface: async () => {
+          throw new Error("no display available");
+        },
+      });
+      expect(result.status).toBe("failure");
+      if (result.status === "failure") {
+        expect(result.error.code).toBe("APP_ERROR");
+        expect(result.error.message).toContain("no display");
+      }
+      expect(result.evidence.directory).toBeTruthy();
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("keeps a successful result when teardown fails", async () => {
+    // The run produced typed outputs and verified its checkpoint. Failing to shut the surface
+    // down afterwards must not discard that.
+    const evidenceRoot = await mkdtemp(join(tmpdir(), "port-"));
+    try {
+      const fake = new FakeDesktopSurface();
+      fake.close = async () => {
+        throw new Error("adapter hung on shutdown");
+      };
+
+      const result = await replay({
+        artifact,
+        inputs: { accountId: "12345" },
+        secrets: { user: "operator" },
+        policy: policy(),
+        evidenceRoot,
+        createSurface: async () => fake,
+      });
+
+      expect(result.status).toBe("success");
+      if (result.status === "success") expect(result.outputs).toEqual({ accountType: "CHECKING" });
+
+      // …and the teardown failure is recorded rather than silently swallowed.
+      const events = await readFile(join(result.evidence.directory, "events.jsonl"), "utf8");
+      expect(events).toContain("surface.teardown_failed");
+      expect(events).toContain("adapter hung on shutdown");
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+describe("discovery honours the same contract (PR11 review #1)", () => {
+  it("returns failed rather than throwing when the surface cannot be opened", async () => {
+    // This was fixed in replay() during the PR3 review and never applied to discovery, where
+    // launch sat outside the try. A rejecting factory threw instead of producing a result.
+    const { discover } = await import("../src/discovery.js");
+    const evidenceRoot = await mkdtemp(join(tmpdir(), "port-"));
+    try {
+      const result = await discover({
+        goal: "does not matter — nothing opens",
+        capabilityId: "never_recorded",
+        baseUrl: "http://app.test",
+        policy: Policy.parse({ allowedOrigins: ["http://app.test"] }),
+        inputs: {},
+        secrets: {},
+        evidenceRoot,
+        // A real key is never used: the run fails before any model call.
+        apiKey: "not-used",
+        createSurface: async () => {
+          throw new Error("no display available");
+        },
+      });
+
+      expect(result.status).toBe("failed");
+      if (result.status === "failed") expect(result.reason).toContain("no display");
+      expect(result.modelCalls).toBe(0);
+
+      // The failure is in the evidence, not only in the return value.
+      const events = await readFile(join(result.evidenceDir, "events.jsonl"), "utf8");
+      expect(events).toContain("discovery.failed");
     } finally {
       await rm(evidenceRoot, { recursive: true, force: true });
     }
