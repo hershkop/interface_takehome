@@ -183,3 +183,72 @@ describe("console server", () => {
     expect(res.status).toBe(409);
   });
 });
+
+describe("capability management", () => {
+  let stop: (() => Promise<void>) | undefined;
+  const start = async () => {
+    const started = await startConsole({ port: 0, host: "127.0.0.1" });
+    stop = started.close;
+    return started.url;
+  };
+  afterEach(async () => {
+    await stop?.();
+    stop = undefined;
+  });
+
+  it("refuses to save an artifact that does not validate", async () => {
+    // The console is where a reviewer promotes a draft. An editor that can save a broken
+    // capability turns review into a way to break things.
+    const url = await start();
+    const { capabilities } = await (await fetch(`${url}/api/capabilities`)).json();
+    const first = capabilities[0];
+    if (!first) return; // no artifacts checked out; nothing to assert against
+
+    const broken = structuredClone(first.artifact);
+    delete broken.metadata.risk; // risk is mandatory by design
+
+    const res = await fetch(`${url}/api/capabilities/${first.capabilityId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifact: broken }),
+    });
+    expect(res.status).toBe(422);
+    const payload = await res.json();
+    expect(payload.issues.length).toBeGreaterThan(0);
+  });
+
+  it("refuses to rename a capability through the editor", async () => {
+    // Renaming would orphan the file it was loaded from and could collide with another.
+    const url = await start();
+    const { capabilities } = await (await fetch(`${url}/api/capabilities`)).json();
+    const first = capabilities[0];
+    if (!first) return;
+
+    const renamed = structuredClone(first.artifact);
+    renamed.capabilityId = "something_else_entirely";
+
+    const res = await fetch(`${url}/api/capabilities/${first.capabilityId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifact: renamed }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("404s edits and deletes of capabilities that do not exist", async () => {
+    // The id arrives from a URL and ends up naming a file, so it is looked up in the catalog
+    // rather than concatenated into a path — a crafted id matches nothing.
+    const url = await start();
+    for (const id of ["no_such_capability", "..%2f..%2fpackage.json", "..%2F.env"]) {
+      const del = await fetch(`${url}/api/capabilities/${id}`, { method: "DELETE" });
+      expect(del.status, `DELETE ${id}`).toBe(404);
+
+      const put = await fetch(`${url}/api/capabilities/${id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ artifact: {} }),
+      });
+      expect(put.status, `PUT ${id}`).toBe(404);
+    }
+  });
+});

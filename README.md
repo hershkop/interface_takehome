@@ -205,10 +205,28 @@ exist**, **run one**, **record a new one**, and **take over when a run stops for
 | **Replay** | fill the inputs, run it, watch the events stream in, see the typed result |
 | **Record** | a goal and a capability id start a real discovery run; the recorded draft appears in the list when it finishes |
 | **Handoff** | a run that escalates surfaces a card with the reason, the step, the page it stopped on, and the screenshot — plus the three decisions |
+| **Review** | filter the list, add a reviewer note, promote a draft to `approved`, edit the raw artifact, or delete it |
 
 It is **not a co-browsing surface**. When a run hands over, the operator acts in the *real
 application's* browser window — the same live session the automation was using, which is the
 entire point of the handoff. The console carries the context and the decision, not the pixels.
+
+### Reviewing a capability
+
+The console is where a draft becomes trusted, so the review actions live there:
+
+- **Filter** across id, name, description, status, risk and notes.
+- **Notes** are stored on the artifact itself (`metadata.notes`), not in a sidecar — the brief
+  asks for artifacts to be *reviewable*, and why someone approved a draft is part of what a
+  later reader needs. Versioned by git, never used for control flow.
+- **Approve / return to draft** flips `metadata.status`. Approving is immediately visible to
+  agents: a draft is hidden from `capabilities --json` and refused by `invoke`.
+- **Edit** the full artifact as JSON, validated against the same Zod schema replay uses. An
+  artifact that would not replay cannot be saved, and the schema's own issues come back to the
+  editor verbatim.
+- **Delete** takes two clicks and **moves the file to `capabilities/.trash/`** rather than
+  unlinking it. A discovered capability can be a real model run that is not committed yet;
+  making deletion recoverable costs a rename.
 
 ### What it proves
 

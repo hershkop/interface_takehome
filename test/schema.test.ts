@@ -436,3 +436,20 @@ describe("an output's declared type must match its coercion (PR6 review #3)", ()
     expect(CapabilityArtifact.safeParse(a).success).toBe(true);
   });
 });
+
+describe("reviewer notes on a capability", () => {
+  it("are optional and travel with the artifact", () => {
+    const a = baseArtifact() as any;
+    expect(CapabilityArtifact.safeParse(a).success).toBe(true);
+
+    a.metadata.notes = "Approved after replaying cleanly on four accounts.";
+    const parsed = CapabilityArtifact.parse(a);
+    expect(parsed.metadata.notes).toContain("four accounts");
+  });
+
+  it("are bounded, so the artifact stays reviewable", () => {
+    const a = baseArtifact() as any;
+    a.metadata.notes = "x".repeat(4001);
+    expect(CapabilityArtifact.safeParse(a).success).toBe(false);
+  });
+});
