@@ -1,0 +1,294 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Capability console</title>
+<style>
+  :root {
+    --bg: #12141a; --panel: #1a1d26; --line: #2a2f3d; --ink: #e6e8ee;
+    --dim: #8b93a7; --accent: #6ea8ff; --ok: #4ec98a; --warn: #f0b429; --bad: #ef6b73;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--line); display: flex;
+           align-items: baseline; gap: 14px; }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .sub { color: var(--dim); font-size: 12px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; align-items: start; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  section > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+                 color: var(--dim); margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .body { padding: 14px; }
+  .cap { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }
+  .cap h3 { margin: 0 0 2px; font-size: 14px; font-family: ui-monospace, monospace; }
+  .cap p { margin: 0 0 8px; color: var(--dim); font-size: 12.5px; }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line);
+         color: var(--dim); font-family: ui-monospace, monospace; }
+  .tag.approved { color: var(--ok); border-color: #2b5f47; }
+  .tag.draft { color: var(--warn); border-color: #6b551a; }
+  .tag.risk { color: var(--bad); border-color: #6b2f33; }
+  button { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--line); background: #232838; color: var(--ink); }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  label { display: block; font-size: 12px; color: var(--dim); margin: 8px 0 3px; }
+  input, textarea { width: 100%; padding: 6px 9px; border-radius: 6px; border: 1px solid var(--line);
+                    background: #0e1016; color: var(--ink); font: inherit; font-size: 13px; }
+  textarea { min-height: 62px; resize: vertical; }
+  .run { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }
+  .run .top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+  .state { font-size: 11px; font-family: ui-monospace, monospace; }
+  .state.running { color: var(--accent); }
+  .state.awaiting_human { color: var(--warn); }
+  .state.finished { color: var(--dim); }
+  .log { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--dim);
+         max-height: 190px; overflow: auto; margin-top: 8px; border-top: 1px solid var(--line);
+         padding-top: 8px; }
+  .log div { white-space: pre-wrap; word-break: break-word; }
+  .result { margin-top: 8px; font-family: ui-monospace, monospace; font-size: 12px;
+            padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); }
+  .result.success, .result.business_outcome { border-color: #2b5f47; color: var(--ok); }
+  .result.failure { border-color: #6b2f33; color: var(--bad); }
+  .result.escalated { border-color: #6b551a; color: var(--warn); }
+  .handoff { border: 1px solid var(--warn); border-radius: 8px; padding: 14px; margin-bottom: 12px;
+             background: #1f1a10; }
+  .handoff h3 { margin: 0 0 4px; font-size: 14px; color: var(--warn); }
+  .handoff dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px;
+                margin: 8px 0; font-size: 12.5px; }
+  .handoff dt { color: var(--dim); }
+  .handoff dd { margin: 0; font-family: ui-monospace, monospace; word-break: break-all; }
+  .handoff img { width: 100%; border: 1px solid var(--line); border-radius: 6px; margin: 8px 0; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .note { font-size: 12px; color: var(--dim); margin-top: 8px; }
+  .empty { color: var(--dim); font-size: 13px; padding: 4px 0; }
+  .err { color: var(--bad); font-size: 12.5px; margin-top: 6px; }
+</style>
+
+<header>
+  <h1>Capability console</h1>
+  <span class="sub" id="conn">connecting…</span>
+</header>
+
+<main>
+  <div>
+    <section id="handoffs" hidden>
+      <h2>Needs a human</h2>
+      <div class="body" id="handoffBody"></div>
+    </section>
+
+    <section style="margin-top:16px">
+      <h2>Capabilities</h2>
+      <div class="body" id="caps"><div class="empty">loading…</div></div>
+    </section>
+
+    <section style="margin-top:16px">
+      <h2>Record a new capability</h2>
+      <div class="body">
+        <label>Goal</label>
+        <textarea id="goal" placeholder="Log in, then look up account 12678 and read its balance and account type."></textarea>
+        <label>Capability id (lower_snake_case)</label>
+        <input id="capId" placeholder="lookup_balance_discovered" />
+        <label>Inputs to parameterise — name=value, comma separated</label>
+        <input id="discInputs" placeholder="accountId=12678" />
+        <div class="actions">
+          <button class="primary" id="discoverBtn">Run discovery</button>
+        </div>
+        <p class="note">Uses a model and needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>.
+          The recorded artifact lands as a <strong>draft</strong>.</p>
+        <div class="err" id="discErr"></div>
+      </div>
+    </section>
+  </div>
+
+  <section>
+    <h2>Runs</h2>
+    <div class="body" id="runs"><div class="empty">nothing yet</div></div>
+  </section>
+</main>
+
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+  const runs = new Map();
+  let capabilities = [];
+
+  const esc = (s) =>
+    String(s ?? "").replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+  // ── Capabilities ───────────────────────────────────────────────────────────
+  async function loadCapabilities() {
+    const { capabilities: list, invalid } = await (await fetch("/api/capabilities")).json();
+    capabilities = list;
+    $("caps").innerHTML =
+      (list.length ? "" : '<div class="empty">no capabilities in capabilities/</div>') +
+      list.map(renderCapability).join("") +
+      invalid.map((i) => `<div class="err">invalid: ${esc(i.path)} — ${esc(i.reason)}</div>`).join("");
+  }
+
+  function renderCapability(c) {
+    const ins = Object.entries(c.inputs);
+    return `
+      <div class="cap">
+        <h3>${esc(c.capabilityId)}</h3>
+        <div class="tags">
+          <span class="tag ${c.status}">${esc(c.status)}</span>
+          <span class="tag${c.risk === "safe" ? "" : " risk"}">risk: ${esc(c.risk)}</span>
+          <span class="tag">v${esc(c.version)}</span>
+          <span class="tag">${c.stepCount} steps</span>
+          <span class="tag">${c.handlerCount} handlers</span>
+        </div>
+        <p>${esc(c.description)}</p>
+        ${ins.map(([n, d]) => `
+          <label>${esc(n)} <span style="opacity:.6">(${esc(d.type)}${d.required === false ? ", optional" : ""})</span></label>
+          <input data-cap="${esc(c.capabilityId)}" data-input="${esc(n)}" placeholder="${esc(d.description ?? "")}" />
+        `).join("")}
+        <div class="actions">
+          <button class="primary" data-replay="${esc(c.capabilityId)}">Replay</button>
+        </div>
+      </div>`;
+  }
+
+  $("caps").addEventListener("click", async (e) => {
+    const id = e.target.dataset?.replay;
+    if (!id) return;
+    const inputs = {};
+    document.querySelectorAll(`[data-cap="${CSS.escape(id)}"]`).forEach((el) => {
+      if (el.value.trim()) inputs[el.dataset.input] = el.value.trim();
+    });
+    e.target.disabled = true;
+    await fetch("/api/replay", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ capabilityId: id, inputs, headed: true }),
+    });
+    e.target.disabled = false;
+  });
+
+  // ── Discovery ──────────────────────────────────────────────────────────────
+  $("discoverBtn").addEventListener("click", async (e) => {
+    const inputs = {};
+    for (const pair of $("discInputs").value.split(",")) {
+      const [k, ...rest] = pair.split("=");
+      if (k?.trim() && rest.length) inputs[k.trim()] = rest.join("=").trim();
+    }
+    e.target.disabled = true;
+    $("discErr").textContent = "";
+    const res = await fetch("/api/discover", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ goal: $("goal").value, capabilityId: $("capId").value, inputs }),
+    });
+    if (!res.ok) $("discErr").textContent = (await res.json()).error ?? "failed to start";
+    e.target.disabled = false;
+  });
+
+  // ── Runs and the live stream ───────────────────────────────────────────────
+  function renderRuns() {
+    const list = [...runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    $("runs").innerHTML = list.length
+      ? list.map(renderRun).join("")
+      : '<div class="empty">nothing yet</div>';
+
+    const pending = list.filter((r) => r.intervention);
+    $("handoffs").hidden = pending.length === 0;
+    $("handoffBody").innerHTML = pending.map(renderHandoff).join("");
+  }
+
+  function renderRun(r) {
+    const tail = (r.events ?? []).slice(-14).map((e) =>
+      `<div>${esc(e.type)}${e.stepId ? " · " + esc(e.stepId) : ""}${
+        e.errorCode ? " · " + esc(e.errorCode) : ""}</div>`).join("");
+    return `
+      <div class="run">
+        <div class="top">
+          <strong>${esc(r.label)}</strong>
+          <span class="state ${r.state}">${esc(r.state)}</span>
+        </div>
+        <div style="font-size:12px;color:var(--dim)">${esc(r.kind)}</div>
+        ${r.result ? renderResult(r.result) : ""}
+        ${r.error ? `<div class="err">${esc(r.error)}</div>` : ""}
+        ${tail ? `<div class="log">${tail}</div>` : ""}
+      </div>`;
+  }
+
+  function renderResult(result) {
+    const status = result.status ?? (result.artifact ? "recorded" : result.reason ? "stuck" : "done");
+    const lines = [];
+    if (result.outputs) for (const [k, v] of Object.entries(result.outputs)) lines.push(`${k} = ${JSON.stringify(v)}`);
+    if (result.outcome) lines.push(`outcome: ${result.outcome}`);
+    if (result.error?.code) lines.push(`${result.error.code}: ${result.error.message}`);
+    if (result.reason) lines.push(result.reason);
+    if (result.artifactPath) lines.push(`saved: ${result.artifactPath}`);
+    if (result.evidence?.modelCalls !== undefined) lines.push(`model calls: ${result.evidence.modelCalls}`);
+    const cls = ["success", "business_outcome", "failure", "escalated"].includes(status) ? status : "";
+    return `<div class="result ${cls}"><strong>${esc(status)}</strong><br>${lines.map(esc).join("<br>")}</div>`;
+  }
+
+  function renderHandoff(r) {
+    const i = r.intervention;
+    const shot = i.screenshot ? `/evidence/${i.screenshot.replace(/^evidence\//, "")}` : null;
+    const s = i.observedState ?? {};
+    return `
+      <div class="handoff">
+        <h3>${esc(r.label)} needs you</h3>
+        <div>${esc(i.message)}</div>
+        <dl>
+          <dt>why</dt><dd>${esc(i.reason)}</dd>
+          ${i.step ? `<dt>step</dt><dd>${i.step.index} · ${esc(i.step.id)}</dd>` : ""}
+          ${s.title ? `<dt>page</dt><dd>${esc(s.title)}</dd>` : ""}
+          ${s.url ? `<dt>url</dt><dd>${esc(s.url)}</dd>` : ""}
+          ${s.alerts?.length ? `<dt>on screen</dt><dd>${esc(s.alerts.join(" | "))}</dd>` : ""}
+        </dl>
+        ${shot ? `<img src="${esc(shot)}" alt="the screen when the run stopped" />` : ""}
+        <p class="note">Automation is locked out of this session until you answer. Act in the
+          <strong>browser window</strong> that opened — it is the same live session.</p>
+        <div class="actions">
+          <button data-answer="completed_by_human" data-run="${esc(r.id)}">I did it — skip the step</button>
+          <button class="primary" data-answer="proceed" data-run="${esc(r.id)}">Approve — automation performs it</button>
+          <button class="danger" data-answer="abort" data-run="${esc(r.id)}">Abort</button>
+        </div>
+      </div>`;
+  }
+
+  $("handoffBody").addEventListener("click", async (e) => {
+    const decision = e.target.dataset?.answer;
+    if (!decision) return;
+    e.target.closest(".actions").querySelectorAll("button").forEach((b) => (b.disabled = true));
+    await fetch(`/api/intervene/${e.target.dataset.run}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision, reason: decision === "abort" ? "declined in console" : undefined }),
+    });
+  });
+
+  const stream = new EventSource("/api/stream");
+  stream.onopen = () => ($("conn").textContent = "live");
+  stream.onerror = () => ($("conn").textContent = "reconnecting…");
+  stream.onmessage = (msg) => {
+    const e = JSON.parse(msg.data);
+    if (e.type === "hello") {
+      for (const r of e.runs) runs.set(r.id, { ...r, events: [] });
+    } else if (e.type === "run.event") {
+      const r = runs.get(e.runId);
+      if (r) (r.events ??= []).push(e.payload);
+    } else if (e.type === "run.intervention") {
+      const r = runs.get(e.runId);
+      if (r) { r.intervention = e.payload; r.state = "awaiting_human"; }
+    } else if (e.type === "run.resumed") {
+      const r = runs.get(e.runId);
+      if (r) { delete r.intervention; r.state = "running"; }
+    } else if (e.payload?.id) {
+      const prev = runs.get(e.payload.id);
+      runs.set(e.payload.id, { ...e.payload, events: prev?.events ?? [] });
+      // A finished discovery may have written a new artifact.
+      if (e.type === "run.finished") void loadCapabilities();
+    }
+    renderRuns();
+  };
+
+  loadCapabilities();
+</script>

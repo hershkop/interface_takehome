@@ -49,6 +49,14 @@ export interface EvidenceRecorderOptions {
   redact: Redactor;
   /** Defaults to `evidence/`. */
   rootDir?: string;
+  /**
+   * Called with each event as it is written, already redacted.
+   *
+   * The file on disk stays the record of truth; this only lets something watch a run in
+   * flight — the console streams it to a browser. A subscriber that throws must never
+   * interfere with evidence being written, so it is invoked defensively.
+   */
+  onEvent?: (event: EvidenceEvent) => void;
 }
 
 export class EvidenceRecorder {
@@ -58,6 +66,7 @@ export class EvidenceRecorder {
 
   private readonly phase: RunPhase;
   private readonly redact: Redactor;
+  private readonly onEvent: ((event: EvidenceEvent) => void) | undefined;
   private readonly screenshots: string[] = [];
   private modelCalls = 0;
   private tracePath: string | undefined;
@@ -70,6 +79,7 @@ export class EvidenceRecorder {
     this.runId = options.runId;
     this.phase = options.phase;
     this.redact = options.redact;
+    this.onEvent = options.onEvent;
     this.directory = join(options.rootDir ?? "evidence", options.runId);
     this.eventLogPath = join(this.directory, "events.jsonl");
     this.ready = mkdir(this.directory, { recursive: true }).then(() => undefined);
@@ -84,7 +94,13 @@ export class EvidenceRecorder {
       phase: this.phase,
       ...event,
     };
-    await appendFile(this.eventLogPath, `${JSON.stringify(redactDeep(full, this.redact))}\n`, "utf8");
+    const redacted = redactDeep(full, this.redact);
+    await appendFile(this.eventLogPath, `${JSON.stringify(redacted)}\n`, "utf8");
+    try {
+      this.onEvent?.(redacted);
+    } catch {
+      // A watcher's failure is not the run's problem.
+    }
   }
 
   /**

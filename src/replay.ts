@@ -32,7 +32,7 @@ import {
   type RunError,
   type RunResult,
 } from "./schema.js";
-import { EvidenceRecorder, newRunId } from "./evidence.js";
+import { EvidenceRecorder, newRunId, type EvidenceEvent } from "./evidence.js";
 import { GuardedSurface, PolicyGuard } from "./safety.js";
 import {
   OwnedSurface,
@@ -67,6 +67,8 @@ export interface ReplayOptions {
   postconditionTimeoutMs?: number;
   /** Point at a specific Chromium build. */
   executablePath?: string;
+  /** Watch events as they are recorded. The console streams these to a browser. */
+  onEvent?: (event: EvidenceEvent) => void;
   /**
    * Enforced for the whole run. Omitting it is not "no policy" — the caller must supply one,
    * because a guard that can be forgotten is not a guard.
@@ -189,6 +191,7 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
     phase: "replay",
     redact,
     ...(options.evidenceRoot ? { rootDir: options.evidenceRoot } : {}),
+    ...(options.onEvent ? { onEvent: options.onEvent } : {}),
   });
 
   const baseUrl = options.baseUrl ?? artifact.target.baseUrl;

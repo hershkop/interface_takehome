@@ -32,7 +32,7 @@ import type {
   Target,
 } from "./schema.js";
 import { Action, CapabilityArtifact as ArtifactSchema } from "./schema.js";
-import { EvidenceRecorder, newRunId } from "./evidence.js";
+import { EvidenceRecorder, newRunId, type EvidenceEvent } from "./evidence.js";
 import { SessionController, type InterventionChannel } from "./handoff.js";
 import { createRedactor } from "./redact.js";
 import { GuardedSurface, PolicyGuard } from "./safety.js";
@@ -56,6 +56,8 @@ export interface DiscoveryRequest {
    * able to move money simply because nobody was watching.
    */
   interventionChannel?: InterventionChannel;
+  /** Watch events as they are recorded. The console streams these to a browser. */
+  onEvent?: (event: EvidenceEvent) => void;
   headed?: boolean;
   evidenceRoot?: string;
   apiKey: string;
@@ -198,6 +200,7 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
     phase: "discovery",
     redact,
     ...(request.evidenceRoot ? { rootDir: request.evidenceRoot } : {}),
+    ...(request.onEvent ? { onEvent: request.onEvent } : {}),
   });
 
   await recorder.writeRunHeader({

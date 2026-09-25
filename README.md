@@ -20,9 +20,30 @@ Requires Node 20+ and Docker.
 npm install
 npm run install:browsers    # downloads Chromium — npm install does NOT do this
 cp .env.example .env        # optional; the defaults work as-is
+./start.sh                  # ParaBank, seeded, plus the operator console
+```
+
+| | |
+|---|---|
+| `./start.sh` | brings ParaBank up, waits for it to be healthy, seeds the fixture data, and starts the console |
+| `./stop.sh` | stops the console and ParaBank, and clears any leftover browser processes |
+| `./logs.sh` | follows ParaBank's logs (`--console` for the console's) |
+
+`./start.sh --no-console` skips the console if you only want the CLI. `./stop.sh --clean` also
+drops ParaBank's volumes. `./logs.sh --help` lists the rest.
+
+Fixture data is re-seeded on every start, deliberately: demo transfers move real money inside
+the container, so balances drift without it. Use `--no-seed` to keep whatever state is there.
+
+<details>
+<summary>The equivalent by hand</summary>
+
+```bash
 docker compose up -d        # starts ParaBank
 npm run setup               # seeds it and prints the demo account IDs
+npm run console             # the operator console
 ```
+</details>
 
 `npm run install:browsers` is not optional and `npm install` will not do it for you: the
 Playwright *package* installs from npm, but the browser binary is a separate download. Without
@@ -168,6 +189,44 @@ npm run cli -- replay capabilities/transfer_funds.v1.json \
   │   [a]bort    stop the run
   └────────────────────────────────────────────────────────────────
 ```
+
+## The operator console
+
+```bash
+npm run console      # http://127.0.0.1:17080
+```
+
+A local web console for the four things a person actually needs to do: **see what capabilities
+exist**, **run one**, **record a new one**, and **take over when a run stops for a human**.
+
+| | |
+|---|---|
+| **Capabilities** | every artifact with its status, risk, step and handler counts, and a form generated from its declared inputs |
+| **Replay** | fill the inputs, run it, watch the events stream in, see the typed result |
+| **Record** | a goal and a capability id start a real discovery run; the recorded draft appears in the list when it finishes |
+| **Handoff** | a run that escalates surfaces a card with the reason, the step, the page it stopped on, and the screenshot — plus the three decisions |
+
+It is **not a co-browsing surface**. When a run hands over, the operator acts in the *real
+application's* browser window — the same live session the automation was using, which is the
+entire point of the handoff. The console carries the context and the decision, not the pixels.
+
+### What it proves
+
+REPORT.md §5 claims that swapping the operator surface "changes no other file". This is that
+claim under test rather than asserted: `WebInterventionChannel` is a second implementation of
+the same one-method `InterventionChannel` interface, and **nothing in `replay.ts`, `handoff.ts`
+or `discovery.ts` changed to support it**. The ownership lock, the context captured before
+handing over, and the fresh observation before taking control back are all untouched.
+
+The only addition anywhere else was an optional `onEvent` hook on the evidence recorder, so a
+run can be watched while it is in flight. The file on disk is still the record of truth.
+
+### Security
+
+Binds to `127.0.0.1` with **no authentication**. It can start browser sessions and read the
+evidence directory, so it is a local development and demo surface and must not be exposed.
+Evidence files are served only from under `evidence/` and only as `.png` / `.json` / `.jsonl`;
+a path resolving outside that root is refused.
 
 ## Demo — capabilities as agent-callable tools
 
