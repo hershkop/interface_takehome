@@ -60,8 +60,12 @@ export class EvidenceRecorder {
   private readonly screenshots: string[] = [];
   private modelCalls = 0;
   private readonly tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  /** Distinguishes "no usage was reported" from "usage was reported and was zero". */
-  private sawUsage = false;
+  /**
+   * How many model calls came back with usage attached. Compared against `modelCalls` to tell
+   * a complete accounting from one missing the requests that threw — a call is counted before
+   * the request goes out, but only a response carries tokens.
+   */
+  private usageReports = 0;
   private tracePath: string | undefined;
   private failureSnapshotPath: string | undefined;
   private humanActionsPath: string | undefined;
@@ -174,7 +178,7 @@ export class EvidenceRecorder {
     this.tokens.output += usage.output_tokens ?? 0;
     this.tokens.cacheRead += usage.cache_read_input_tokens ?? 0;
     this.tokens.cacheWrite += usage.cache_creation_input_tokens ?? 0;
-    this.sawUsage = true;
+    this.usageReports++;
   }
 
   get modelCallCount(): number {
@@ -192,7 +196,9 @@ export class EvidenceRecorder {
       failureSnapshot: this.failureSnapshotPath,
       ...(this.humanActionsPath ? { humanActions: this.humanActionsPath } : {}),
       modelCalls: this.modelCalls,
-      ...(this.sawUsage ? { tokens: { ...this.tokens } } : {}),
+      ...(this.usageReports > 0
+        ? { tokens: { ...this.tokens }, modelResponses: this.usageReports }
+        : {}),
     };
   }
 
@@ -243,6 +249,10 @@ export class EvidenceRecorder {
       `${JSON.stringify(
         {
           modelCalls: this.modelCalls,
+          // Fewer responses than calls means some request threw before reporting usage, so
+          // the totals below are a floor rather than the whole bill. Recorded as a number the
+          // audit can compare rather than a flag this file has to decide the meaning of.
+          modelResponses: this.usageReports,
           tokens: { ...this.tokens },
           finishedAt: new Date().toISOString(),
         },

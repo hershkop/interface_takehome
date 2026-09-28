@@ -66,6 +66,30 @@ describe("usage recording", () => {
     });
   });
 
+  it("records how many calls came back, so a thrown request cannot read as complete", async () => {
+    const root = join(workDir, "partial");
+    const recorder = new EvidenceRecorder({
+      runId: "discover-partial",
+      phase: "discovery",
+      redact,
+      rootDir: root,
+    });
+
+    recorder.recordModelCall();
+    recorder.recordUsage({ input_tokens: 900, output_tokens: 100 });
+    // The second request throws: counted before it went out, never reported usage.
+    recorder.recordModelCall();
+    await recorder.writeUsage();
+
+    const written = JSON.parse(
+      await readFile(join(root, "discover-partial", "usage.json"), "utf8"),
+    ) as Record<string, unknown>;
+
+    expect(written["modelCalls"]).toBe(2);
+    expect(written["modelResponses"]).toBe(1);
+    expect(recorder.summary().modelResponses).toBe(1);
+  });
+
   it("omits tokens entirely when no model was called, rather than reporting zeros", async () => {
     const root = join(workDir, "none");
     const recorder = new EvidenceRecorder({
@@ -187,7 +211,8 @@ describe("auditRuns", () => {
     const free = byDir.get("replay-free")!;
     expect(free.outcome).toBe("business_outcome:account_not_found");
     expect(free.modelCalls).toBe(0);
-    expect(free.costUsd).toBeUndefined();
+    // Zero, not unknown: no model calls costs nothing regardless of any rate card.
+    expect(free.costUsd).toBe(0);
 
     expect(report.totals.runs).toBe(3);
     expect(report.totals.modelCalls).toBe(3);
@@ -209,24 +234,121 @@ describe("auditRuns", () => {
     expect(report.rows[0]!.outcome).toBe("incomplete");
   });
 
-  it("walks committed example runs alongside ordinary ones", async () => {
+  it("shows a committed copy but bills the execution once", async () => {
     const root = join(workDir, "with-examples");
-    await fakeRun(root, "replay-plain", {
-      "run.json": { runId: "replay-plain", phase: "replay" },
-      "events.jsonl": "",
-    });
-    await fakeRun(root, join("examples", "01-discovery-llm-run"), {
-      "run.json": { runId: "discover-original", phase: "discovery", model: "claude-opus-5" },
+    const run = {
+      "run.json": {
+        runId: "discover-original",
+        phase: "discovery",
+        model: "claude-opus-5",
+        startedAt: "2026-09-24T15:04:43.335Z",
+      },
+      "usage.json": {
+        modelCalls: 10,
+        modelResponses: 10,
+        tokens: { input: 100_000, output: 4_000, cacheRead: 0, cacheWrite: 0 },
+      },
       "events.jsonl": `${JSON.stringify({ timestamp: "2026-09-24T15:05:24.221Z", type: "discovery.complete" })}\n`,
+    };
+    await fakeRun(root, "discover-original", run);
+    // Byte-identical copy under examples/, exactly as the repository commits them.
+    await fakeRun(root, join("examples", "01-discovery-llm-run"), run);
+
+    const report = await auditRuns(root);
+    const original = report.rows.find((r) => r.dir === "discover-original")!;
+    const copy = report.rows.find((r) => r.dir === join("examples", "01-discovery-llm-run"))!;
+
+    // Both rows are shown — the copy is the evidence a reader is pointed at.
+    expect(report.rows).toHaveLength(2);
+    expect(copy.runId).toBe("discover-original");
+    expect(copy.outcome).toBe("recorded");
+
+    // The run under its own id owns the execution; the copy is marked and excluded.
+    expect(original.duplicateOf).toBeUndefined();
+    expect(copy.duplicateOf).toBe("discover-original");
+    expect(report.totals.runs).toBe(1);
+    expect(report.totals.duplicates).toBe(1);
+    expect(report.totals.modelCalls).toBe(10);
+    expect(report.totals.tokens.input).toBe(100_000);
+    expect(report.totals.costUsd).toBeCloseTo(0.6, 10);
+  });
+
+  it("reads past a teardown failure to the outcome the run actually reached", async () => {
+    const root = join(workDir, "teardown");
+    await fakeRun(root, "discover-messy-close", {
+      "run.json": { runId: "discover-messy-close", phase: "discovery", model: "claude-opus-5" },
+      // Discovery writes its terminal event, then tears the surface down in `finally`.
+      "events.jsonl":
+        `${JSON.stringify({ timestamp: "2026-09-28T10:00:10.000Z", type: "discovery.complete" })}\n` +
+        `${JSON.stringify({ timestamp: "2026-09-28T10:00:11.000Z", type: "surface.teardown_failed" })}\n`,
     });
 
     const report = await auditRuns(root);
-    const example = report.rows.find((r) => r.dir === join("examples", "01-discovery-llm-run"));
+    // A browser that closed badly does not undo a capability that was recorded.
+    expect(report.rows[0]!.outcome).toBe("recorded");
+  });
 
-    expect(report.rows).toHaveLength(2);
-    expect(example).toBeDefined();
-    // A committed copy keeps the original's runId, so the directory is what identifies a row.
-    expect(example!.runId).toBe("discover-original");
-    expect(example!.outcome).toBe("recorded");
+  it("marks a run whose accounting is a floor, and prices a call-free run at zero", async () => {
+    const root = join(workDir, "floor");
+    await fakeRun(root, "discover-threw", {
+      "run.json": { runId: "discover-threw", phase: "discovery", model: "claude-opus-5" },
+      "usage.json": {
+        modelCalls: 3,
+        modelResponses: 2,
+        tokens: { input: 10_000, output: 500, cacheRead: 0, cacheWrite: 0 },
+      },
+      "events.jsonl": `${JSON.stringify({ timestamp: "2026-09-28T10:00:30.000Z", type: "discovery.failed" })}\n`,
+    });
+    await fakeRun(root, "replay-free", {
+      "run.json": { runId: "replay-free", phase: "replay" },
+      "result.json": {
+        status: "success",
+        outputs: {},
+        evidence: {
+          runId: "replay-free",
+          directory: "evidence/replay-free",
+          eventLog: "evidence/replay-free/events.jsonl",
+          traceUnredacted: false,
+          screenshots: [],
+          modelCalls: 0,
+        },
+      },
+      "events.jsonl": "",
+    });
+
+    const report = await auditRuns(root);
+    const threw = report.rows.find((r) => r.dir === "discover-threw")!;
+    const free = report.rows.find((r) => r.dir === "replay-free")!;
+
+    expect(threw.tokensPartial).toBe(true);
+    expect(report.totals.partial).toBe(1);
+    // No model calls is a knowable zero, not a gap — it follows from the result contract.
+    expect(free.tokensPartial).toBe(false);
+    expect(free.costUsd).toBe(0);
+  });
+
+  it("orders runs by when they started, not by directory name", async () => {
+    const root = join(workDir, "chronology");
+    await fakeRun(root, "replay-early", {
+      "run.json": { runId: "replay-early", phase: "replay", startedAt: "2026-09-24T03:42:08.000Z" },
+      "events.jsonl": "",
+    });
+    await fakeRun(root, "discover-late", {
+      "run.json": {
+        runId: "discover-late",
+        phase: "discovery",
+        startedAt: "2026-09-24T15:04:43.000Z",
+      },
+      "events.jsonl": "",
+    });
+    await fakeRun(root, "zzz-undated", {
+      "run.json": { runId: "zzz-undated", phase: "replay" },
+      "events.jsonl": "",
+    });
+
+    const report = await auditRuns(root);
+    // Alphabetically this would be discover-late, replay-early, zzz-undated — a history that
+    // never happened. Runs with no start time sort last so the order stays stable.
+    expect(report.rows.map((r) => r.dir)).toEqual(["replay-early", "discover-late", "zzz-undated"]);
   });
 });

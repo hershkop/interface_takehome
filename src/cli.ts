@@ -286,14 +286,22 @@ async function printAudit(asJson: boolean): Promise<void> {
     `\n${pad("RUN", 34)}${pad("WHAT", 26)}${pad("OUTCOME", 26)}${"CALLS".padStart(6)}${"IN".padStart(10)}${"OUT".padStart(8)}${"COST".padStart(11)}\n`,
   );
   for (const row of report.rows) {
+    // A copy is shown — it is the run a reader is pointed at — but marked, because its numbers
+    // are already in the totals under the original's row.
+    // The marker is appended after truncation, not before: an outcome long enough to be cut —
+    // `business_outcome:account_not_found` — would otherwise lose the "(copy)" along with its
+    // tail, and a copy would read as a second execution.
+    const marker = row.duplicateOf === undefined ? "" : " (copy)";
+    const cost = formatCost(row.costUsd);
     process.stdout.write(
       pad(row.dir, 34) +
         pad(row.capabilityId ?? row.phase, 26) +
-        pad(row.outcome, 26) +
+        pad(row.outcome, 26 - marker.length) +
+        marker +
         num(row.modelCalls, 6) +
         num(row.tokens?.input, 10) +
         num(row.tokens?.output, 8) +
-        formatCost(row.costUsd).padStart(11) +
+        (row.tokensPartial ? `${cost}+`.padStart(11) : cost.padStart(11)) +
         "\n",
     );
   }
@@ -310,6 +318,18 @@ async function printAudit(asJson: boolean): Promise<void> {
 
   // Two ways the total can understate the truth. Both are stated rather than left to be
   // inferred from a number that looks authoritative.
+  if (totals.partial > 0) {
+    process.stdout.write(
+      `  note   : ${totals.partial} run(s) had a request throw before reporting usage (marked +).\n` +
+        `           Their tokens and cost are a floor, not the whole bill.\n`,
+    );
+  }
+  if (totals.duplicates > 0) {
+    process.stdout.write(
+      `  note   : ${totals.duplicates} row(s) are committed copies under examples/ of runs already\n` +
+        `           counted above, and are excluded from these figures.\n`,
+    );
+  }
   if (totals.unaccounted > 0) {
     process.stdout.write(
       `  note   : ${totals.unaccounted} run(s) left no usage record — recorded before token accounting existed.\n` +

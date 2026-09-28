@@ -281,12 +281,16 @@ Three decisions behind the numbers:
 run. What it cost is a function of a price list that changes independently, so the rate card
 lives in `src/config.ts` and is applied at read time — a repricing never rewrites history.
 
-**Unknown is not zero.** A replay's `0` is asserted by its result contract. A discovery run
-recorded before this existed left no usage record at all, and shows `—`, with the count of such
-runs in the footer. Folding those into the total would report money that was spent as free.
+**Unknown is not zero.** A replay makes no model calls, so it costs `$0.0000` — knowable
+without any rate card. A discovery run recorded before this existed left no usage record at
+all, and shows `—`, counted in its own footer line. Folding those into the total would report
+money that was spent as free. Two more cases get the same treatment rather than a plausible
+number: a model with no entry in the rate table is reported unpriced, and a run where a request
+threw before reporting usage is marked `+`, because its tokens are a floor and not the bill.
 
-**An unpriced model is reported, not estimated.** A run whose model has no entry in the rate
-table is counted in its own footer line rather than being quietly given a plausible number.
+**One execution is billed once.** The committed runs under `examples/` are copies of runs also
+present under their own ids. Both rows are shown — the copies are what a reader is pointed at —
+but the copy is marked and excluded from the totals.
 
 ## Demo — capabilities as agent-callable tools
 

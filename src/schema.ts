@@ -670,6 +670,12 @@ export const EvidenceSummary = z.object({
    * of display and old evidence is never invalidated by a repricing.
    */
   tokens: TokenUsage.optional(),
+  /**
+   * How many of those calls returned usage. Below `modelCalls` when a request threw, which
+   * makes `tokens` a floor rather than the full bill — stated as a number so a reader is not
+   * left to assume the accounting is complete.
+   */
+  modelResponses: z.number().int().min(0).optional(),
 });
 export type EvidenceSummary = z.infer<typeof EvidenceSummary>;
 

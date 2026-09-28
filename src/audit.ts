@@ -34,9 +34,22 @@ export interface AuditRow {
    */
   modelCalls: number | undefined;
   tokens: TokenUsage | undefined;
-  /** Undefined when the model is unpriced or nothing was measured — never guessed. */
+  /**
+   * True when fewer responses reported usage than calls were made — a request threw. `tokens`
+   * and `costUsd` are then a floor, not the bill.
+   */
+  tokensPartial: boolean;
+  /**
+   * Zero for a run that made no model calls, undefined when genuinely unknown or unpriced.
+   * The column renders those differently on purpose: `$0.0000` is a result, `—` is a gap.
+   */
   costUsd: number | undefined;
   events: number;
+  /**
+   * Set when this row repeats a runId an earlier row already carries — a committed copy under
+   * `examples/`. Shown, but excluded from the totals so one execution is billed once.
+   */
+  duplicateOf: string | undefined;
 }
 
 export interface AuditReport {
@@ -52,6 +65,10 @@ export interface AuditReport {
     unpriced: number;
     /** No usage record at all: cost unknown, and missing from every figure above. */
     unaccounted: number;
+    /** Counted, but a request threw before reporting usage, so the figures are a floor. */
+    partial: number;
+    /** Rows excluded as copies of an execution already counted. */
+    duplicates: number;
   };
 }
 
@@ -59,16 +76,24 @@ async function readJson(path: string): Promise<unknown> {
   return JSON.parse(await readFile(path, "utf8")) as unknown;
 }
 
-/** Last non-empty line of the event log, parsed. Logs are per-run and small. */
-function lastEvent(log: string): { timestamp?: string; type?: string } | undefined {
-  const lines = log.split("\n").filter((l) => l.trim() !== "");
-  const last = lines[lines.length - 1];
-  if (last === undefined) return undefined;
-  try {
-    return JSON.parse(last) as { timestamp?: string; type?: string };
-  } catch {
-    return undefined;
+interface LoggedEvent {
+  timestamp?: string;
+  type?: string;
+}
+
+/** Every parseable event, in order. Logs are per-run and small. */
+function parseEvents(log: string): LoggedEvent[] {
+  const out: LoggedEvent[] = [];
+  for (const line of log.split("\n")) {
+    if (line.trim() === "") continue;
+    try {
+      out.push(JSON.parse(line) as LoggedEvent);
+    } catch {
+      // A truncated last line is what a killed process leaves behind. Skipping it loses one
+      // event; refusing the whole run would lose the evidence that it was killed.
+    }
   }
+  return out;
 }
 
 /**
@@ -79,10 +104,20 @@ function lastEvent(log: string): { timestamp?: string; type?: string } | undefin
  * events did not finish: that is reported as `incomplete` rather than folded into `failed`,
  * because "the process died" and "the model gave up" are different findings.
  */
-function discoveryOutcome(type: string | undefined): string {
-  if (type === "discovery.complete") return "recorded";
-  if (type === "discovery.stuck") return "stuck";
-  if (type === "discovery.failed") return "failed";
+const DISCOVERY_TERMINAL: Readonly<Record<string, string>> = {
+  "discovery.complete": "recorded",
+  "discovery.stuck": "stuck",
+  "discovery.failed": "failed",
+};
+
+function discoveryOutcome(events: readonly LoggedEvent[]): string {
+  // Searched backward rather than read off the last line: discovery writes its terminal event
+  // and then tears the surface down, and a teardown that fails appends after it. Reading only
+  // the last event would report a completed run as incomplete because the browser closed badly.
+  for (let i = events.length - 1; i >= 0; i--) {
+    const outcome = DISCOVERY_TERMINAL[events[i]?.type ?? ""];
+    if (outcome !== undefined) return outcome;
+  }
   return "incomplete";
 }
 
@@ -104,12 +139,13 @@ async function readRun(rootDir: string, dir: string): Promise<AuditRow> {
 
   const header = (await readJson(path("run.json")).catch(() => ({}))) as Record<string, unknown>;
   const log = await readFile(path("events.jsonl"), "utf8").catch(() => "");
-  const last = lastEvent(log);
+  const events = parseEvents(log);
+  const last = events[events.length - 1];
 
   // A run's own usage record wins over the one embedded in its result: discovery writes only
   // the former, replay only the latter, and a run that somehow has both wrote usage.json last.
   const usage = (await readJson(path("usage.json")).catch(() => undefined)) as
-    | { modelCalls?: number; tokens?: unknown; finishedAt?: string }
+    | { modelCalls?: number; modelResponses?: number; tokens?: unknown; finishedAt?: string }
     | undefined;
 
   const resultRaw = await readJson(path("result.json")).catch(() => undefined);
@@ -128,13 +164,16 @@ async function readRun(rootDir: string, dir: string): Promise<AuditRow> {
     result?.success === true
       ? replayOutcome(result.data)
       : phase === "discovery"
-        ? discoveryOutcome(last?.type)
+        ? discoveryOutcome(events)
         : // A replay whose result.json is missing or unparseable never reported an outcome.
           "incomplete";
 
   const startedAt = typeof header["startedAt"] === "string" ? header["startedAt"] : undefined;
   const finishedAt = usage?.finishedAt ?? last?.timestamp;
   const model = typeof header["model"] === "string" ? header["model"] : undefined;
+
+  const modelCalls = usage?.modelCalls ?? evidence?.modelCalls;
+  const modelResponses = usage?.modelResponses ?? evidence?.modelResponses;
 
   return {
     dir,
@@ -150,10 +189,15 @@ async function readRun(rootDir: string, dir: string): Promise<AuditRow> {
     capabilityId:
       typeof header["capabilityId"] === "string" ? (header["capabilityId"] as string) : undefined,
     outcome,
-    modelCalls: usage?.modelCalls ?? evidence?.modelCalls,
+    modelCalls,
     tokens,
-    costUsd: priceRun(model, tokens),
-    events: log.split("\n").filter((l) => l.trim() !== "").length,
+    tokensPartial:
+      modelCalls !== undefined && modelResponses !== undefined && modelResponses < modelCalls,
+    // A run that never called the model cost nothing, and that is knowable without a rate
+    // card or a token record — it follows from the result contract asserting zero calls.
+    costUsd: modelCalls === 0 ? 0 : priceRun(model, tokens),
+    events: events.length,
+    duplicateOf: undefined,
   };
 }
 
@@ -166,19 +210,25 @@ async function readRun(rootDir: string, dir: string): Promise<AuditRow> {
 export async function auditRuns(rootDir = "evidence"): Promise<AuditReport> {
   const entries = await readdir(rootDir, { withFileTypes: true }).catch(() => []);
   const dirs: string[] = [];
+  const copies: string[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     if (entry.name === "examples") {
       const nested = await readdir(join(rootDir, entry.name), { withFileTypes: true });
-      for (const child of nested) if (child.isDirectory()) dirs.push(join(entry.name, child.name));
+      for (const child of nested)
+        if (child.isDirectory()) copies.push(join(entry.name, child.name));
       continue;
     }
     dirs.push(entry.name);
   }
+  dirs.sort();
+  // Appended after the ordinary runs so that when a copy and its original tie on start time,
+  // the original is the row that carries the execution.
+  dirs.push(...copies.sort());
 
   const rows: AuditRow[] = [];
   const skipped: { dir: string; reason: string }[] = [];
-  for (const dir of dirs.sort()) {
+  for (const dir of dirs) {
     try {
       rows.push(await readRun(rootDir, dir));
     } catch (err) {
@@ -186,9 +236,41 @@ export async function auditRuns(rootDir = "evidence"): Promise<AuditReport> {
     }
   }
 
+  // A committed example is a copy of a run that is also on disk under its own id, so the two
+  // rows are one execution. Both are shown — the copies are the evidence a reader is pointed
+  // at — but only one is billed, or the ledger charges for the same model calls twice.
+  //
+  // Done here, in walk order, rather than after the sort below: the walk appends examples/
+  // last, so the run under its own id is the one that carries the execution. Deduplicating
+  // after sorting would hand that role to whichever row won an arbitrary tie-break on equal
+  // timestamps — which is how the copy came to own it the first time.
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.runId)) row.duplicateOf = row.runId;
+    else seen.add(row.runId);
+  }
+
+  // Chronological, not alphabetical. Sorting directory names groups by the `discover` /
+  // `probe` / `replay` prefix and interleaves the day's runs by phase, which reads as a
+  // history that never happened. Runs with no recorded start sort last, by directory, so the
+  // order is at least stable across invocations.
+  rows.sort((a, b) => {
+    if (a.startedAt !== undefined && b.startedAt !== undefined) {
+      return a.startedAt.localeCompare(b.startedAt) || a.dir.localeCompare(b.dir);
+    }
+    if (a.startedAt !== undefined) return -1;
+    if (b.startedAt !== undefined) return 1;
+    return a.dir.localeCompare(b.dir);
+  });
+
   const totals = rows.reduce(
     (acc, row) => {
+      if (row.duplicateOf !== undefined) {
+        acc.duplicates++;
+        return acc;
+      }
       acc.runs++;
+      if (row.tokensPartial) acc.partial++;
       acc.modelCalls += row.modelCalls ?? 0;
       acc.tokens.input += row.tokens?.input ?? 0;
       acc.tokens.output += row.tokens?.output ?? 0;
@@ -208,6 +290,8 @@ export async function auditRuns(rootDir = "evidence"): Promise<AuditReport> {
       costUsd: 0,
       unpriced: 0,
       unaccounted: 0,
+      partial: 0,
+      duplicates: 0,
     },
   );
 
