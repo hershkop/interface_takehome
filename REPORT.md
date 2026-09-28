@@ -469,8 +469,10 @@ archive.
 
 ### Deliberately not built
 
-**Remote operator console.** The scope note permits mocking it. The control-transfer *model* is
-real; the surface is a terminal prompt.
+**Remote co-browsing.** A local web operator console *was* built (§5, `npm run console`): it
+carries the escalation context, the screenshot and the decision. What is cut is streaming the
+live session to the operator — they act in the real application's browser window instead. The
+scope note permits mocking that, and the control-transfer model is unchanged by it.
 
 **Desktop surface.** Designed for (§4) and not implemented, though the port is now proven
 neutral by a non-browser surface in the test suite. An `opaque` surface also needs its own

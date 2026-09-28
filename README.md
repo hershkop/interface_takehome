@@ -459,8 +459,6 @@ useful for debugging a locator failure than a screenshot anyway).
 configured secrets, because the first version of this claim was made by grepping the JSON and
 missing the archive.
 
-The `discover` / `replay` / `capabilities` CLI arrives in PRs 3–6.
-
 ## What's here now
 
 ```
@@ -471,6 +469,9 @@ src/replay.ts    the deterministic interpreter: steps, handlers, checkpoints, ou
 src/catalog.ts   artifacts as agent-callable tools
 src/template.ts  {{inputs|secrets|vars|baseUrl}} resolution and output coercion
 src/cli.ts       discover | replay | validate | capabilities | invoke
+src/safety.ts    the policy guard: origins, routes, action types, risk, budgets
+src/handoff.ts   SessionController, the ownership lock, and intervention channels
+src/console/     the local web operator console (`npm run console`)
 src/parabank.ts  app-specific glue (re-authentication), injected at the edge
 src/surface.ts   the Surface port + PlaywrightSurface + condition evaluation
 src/locator.ts   candidate list -> exactly one visible element, or a refusal
