@@ -80,6 +80,34 @@
   .confirm { border: 1px solid var(--bad); border-radius: 6px; padding: 10px 12px; margin-top: 10px;
              background: #1f1214; }
   .confirm p { margin: 0 0 8px; font-size: 12.5px; }
+  .wide { grid-column: 1 / -1; }
+  .tiles { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tile { flex: 1 1 120px; border: 1px solid var(--line); border-radius: 6px; padding: 8px 11px; }
+  .tile .k { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+  .tile .v { font-size: 17px; font-family: ui-monospace, monospace; margin-top: 2px; }
+  .tile .v.money { color: var(--ok); }
+  /* Capped rather than run out to full height: the ledger grows without bound, and the
+     footnotes that say what the totals leave out have to stay reachable. */
+  .scroll { overflow: auto; max-height: 420px; }
+  table.ledger { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.ledger th { text-align: left; font-weight: 500; font-size: 11px; color: var(--dim);
+                    text-transform: uppercase; letter-spacing: .06em; padding: 6px 10px 6px 0;
+                    border-bottom: 1px solid var(--line); white-space: nowrap;
+                    position: sticky; top: 0; background: var(--panel); z-index: 1; }
+  table.ledger td { padding: 5px 10px 5px 0; border-bottom: 1px solid #20242f;
+                    font-family: ui-monospace, monospace; white-space: nowrap; }
+  table.ledger th.n, table.ledger td.n { text-align: right; padding-right: 0; }
+  table.ledger tr.copy td { opacity: .5; }
+  /* An em dash where a number belongs is the whole point: a gap that reads as a gap. */
+  td .gap { color: var(--dim); }
+  td .cost { color: var(--ok); }
+  td .cost.zero { color: var(--dim); }
+  .out.ok { color: var(--ok); }
+  .out.bad { color: var(--bad); }
+  .out.warn { color: var(--warn); }
+  .out.dim { color: var(--dim); }
+  .chip { font-size: 10px; padding: 0 5px; border-radius: 999px; border: 1px solid var(--line);
+          color: var(--dim); margin-left: 6px; }
 </style>
 
 <header>
@@ -127,6 +155,23 @@
   <section>
     <h2>Runs</h2>
     <div class="body" id="runs"><div class="empty">nothing yet</div></div>
+  </section>
+
+  <section class="wide">
+    <h2>Audit — every run on disk, and what it cost</h2>
+    <div class="body">
+      <div class="tiles" id="auditTiles"></div>
+      <div class="search">
+        <input id="auditFilter" placeholder="filter by run id, capability, phase or outcome…" />
+        <span class="count" id="auditCount"></span>
+      </div>
+      <div class="scroll" id="auditTable"><div class="empty">loading…</div></div>
+      <div id="auditNotes"></div>
+      <div class="actions">
+        <button id="auditRefresh">Refresh</button>
+        <a class="note" href="/api/audit" target="_blank" rel="noreferrer">raw JSON</a>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -443,6 +488,112 @@
     });
   });
 
+  // ── Audit ──────────────────────────────────────────────────────────────────
+  // The ledger over evidence/, which is a superset of the Runs panel above: that shows what
+  // this console started, this shows every run on disk, CLI invocations included.
+
+  const n = (v) => (v === undefined || v === null ? '<span class="gap">—</span>' : v.toLocaleString());
+
+  /** Zero is a result and renders as money; a gap renders as a gap. They must not look alike. */
+  function cost(row) {
+    if (row.costUsd === undefined || row.costUsd === null) return '<span class="gap">—</span>';
+    const partial = row.tokensPartial ? "+" : "";
+    return `<span class="cost${row.costUsd === 0 ? " zero" : ""}">$${row.costUsd.toFixed(4)}${partial}</span>`;
+  }
+
+  function outcomeClass(outcome) {
+    if (outcome.startsWith("success") || outcome.startsWith("business_outcome")) return "ok";
+    if (outcome === "recorded") return "ok";
+    if (outcome.startsWith("failure") || outcome === "failed" || outcome === "stuck") return "bad";
+    if (outcome.startsWith("escalated")) return "warn";
+    return "dim";
+  }
+
+  let auditReport = null;
+
+  async function loadAudit() {
+    try {
+      auditReport = await (await fetch("/api/audit")).json();
+    } catch {
+      $("auditTable").innerHTML = '<div class="err">could not read evidence/</div>';
+      return;
+    }
+    renderAudit();
+  }
+
+  /** Matches across every field someone might remember a run by. */
+  function auditMatches(row, query) {
+    if (!query) return true;
+    return [row.dir, row.runId, row.capabilityId, row.phase, row.outcome, row.model]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(query);
+  }
+
+  function renderAudit() {
+    if (!auditReport) return;
+    const { rows, totals, skipped } = auditReport;
+    const query = $("auditFilter").value.trim().toLowerCase();
+    const shown = rows.filter((r) => auditMatches(r, query));
+
+    // The tiles always describe the whole ledger, never the filtered view: a total that
+    // silently tracked a search box would be the easiest possible way to misread the bill.
+    $("auditCount").textContent = query ? `${shown.length} of ${rows.length}` : `${rows.length}`;
+
+    $("auditTiles").innerHTML = [
+      ["runs", totals.runs],
+      ["model calls", totals.modelCalls],
+      ["tokens in", totals.tokens.input],
+      ["tokens out", totals.tokens.output],
+    ]
+      .map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v.toLocaleString()}</div></div>`)
+      .join("") +
+      `<div class="tile"><div class="k">cost</div><div class="v money">$${totals.costUsd.toFixed(4)}</div></div>`;
+
+    $("auditTable").innerHTML =
+      rows.length === 0
+        ? '<div class="empty">no runs under evidence/</div>'
+        : shown.length === 0
+          ? `<div class="empty">nothing matches “${esc(query)}”</div>`
+          : `<table class="ledger">
+              <tr><th>Run</th><th>What</th><th>Outcome</th>
+                  <th class="n">Calls</th><th class="n">In</th><th class="n">Out</th><th class="n">Cost</th></tr>
+              ${shown.map(renderAuditRow).join("")}
+            </table>`;
+
+    // Every way the figures above can be incomplete, said out loud. A total that looks
+    // authoritative and quietly omits runs is worse than no total.
+    const notes = [];
+    if (totals.duplicates > 0)
+      notes.push(`${totals.duplicates} row(s) are committed copies under <code>examples/</code> of runs already counted, and are excluded from these figures.`);
+    if (totals.unaccounted > 0)
+      notes.push(`${totals.unaccounted} run(s) left no usage record — recorded before token accounting existed. Their model calls and cost are unknown, and are not in the figures above.`);
+    if (totals.partial > 0)
+      notes.push(`${totals.partial} run(s) had a request throw before reporting usage (marked <code>+</code>). Their tokens and cost are a floor, not the whole bill.`);
+    if (totals.unpriced > 0)
+      notes.push(`${totals.unpriced} run(s) used a model with no rate in <code>src/config.ts</code> and are unpriced.`);
+    for (const bad of skipped ?? []) notes.push(`unreadable: ${esc(bad.dir)} — ${esc(bad.reason)}`);
+
+    $("auditNotes").innerHTML = notes.map((t) => `<p class="note">${t}</p>`).join("");
+  }
+
+  function renderAuditRow(row) {
+    return `
+      <tr class="${row.duplicateOf ? "copy" : ""}">
+        <td>${esc(row.dir)}${row.duplicateOf ? '<span class="chip">copy</span>' : ""}</td>
+        <td>${esc(row.capabilityId ?? row.phase)}</td>
+        <td class="out ${outcomeClass(row.outcome)}">${esc(row.outcome)}</td>
+        <td class="n">${n(row.modelCalls)}</td>
+        <td class="n">${n(row.tokens?.input)}</td>
+        <td class="n">${n(row.tokens?.output)}</td>
+        <td class="n">${cost(row)}</td>
+      </tr>`;
+  }
+
+  $("auditRefresh").addEventListener("click", () => void loadAudit());
+  $("auditFilter").addEventListener("input", renderAudit);
+
   const stream = new EventSource("/api/stream");
   stream.onopen = () => ($("conn").textContent = "live");
   stream.onerror = () => ($("conn").textContent = "reconnecting…");
@@ -462,11 +613,13 @@
     } else if (e.payload?.id) {
       const prev = runs.get(e.payload.id);
       runs.set(e.payload.id, { ...e.payload, events: prev?.events ?? [] });
-      // A finished discovery may have written a new artifact.
-      if (e.type === "run.finished") void loadCapabilities();
+      // A finished discovery may have written a new artifact — and either phase has just
+      // written the evidence the ledger reads.
+      if (e.type === "run.finished") { void loadCapabilities(); void loadAudit(); }
     }
     renderRuns();
   };
 
   loadCapabilities();
+  loadAudit();
 </script>

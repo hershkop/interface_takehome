@@ -128,6 +128,24 @@ describe("console server", () => {
     expect(Array.isArray(catalog.capabilities)).toBe(true);
   });
 
+  it("serves the ledger over evidence/, totals and all", async () => {
+    const url = await start();
+    const res = await fetch(`${url}/api/audit`);
+    expect(res.status).toBe(200);
+
+    const report = await res.json();
+    expect(Array.isArray(report.rows)).toBe(true);
+    // The shape the page renders: without these the tiles read `undefined` rather than break.
+    expect(report.totals).toMatchObject({
+      runs: expect.any(Number),
+      modelCalls: expect.any(Number),
+      costUsd: expect.any(Number),
+      duplicates: expect.any(Number),
+      unaccounted: expect.any(Number),
+    });
+    expect(report.totals.tokens).toMatchObject({ input: expect.any(Number) });
+  });
+
   it("refuses to serve anything outside the evidence directory", async () => {
     // The path comes from a URL, so `../../.env` is a perfectly good request to make.
     const url = await start();
