@@ -14,8 +14,32 @@
            align-items: baseline; gap: 14px; }
   h1 { font-size: 15px; margin: 0; font-weight: 600; }
   .sub { color: var(--dim); font-size: 12px; }
-  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; align-items: start; }
-  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  main { padding: 0 16px 16px; }
+  .pinned { padding: 16px 16px 0; }
+  /* The tab strip sticks: an operator scrolled deep into the ledger still needs the way back,
+     and the handoff banner above it is the one thing that must never scroll out of reach. */
+  .tabs { position: sticky; top: 0; z-index: 2; display: flex; gap: 2px; padding: 0 16px;
+          background: var(--bg); border-bottom: 1px solid var(--line); }
+  .tabs button { background: none; border: 0; border-bottom: 2px solid transparent;
+                 border-radius: 0; padding: 10px 14px; color: var(--dim); font-size: 13px;
+                 display: flex; align-items: center; gap: 7px; }
+  .tabs button:hover { color: var(--ink); }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .badge { font-size: 11px; font-family: ui-monospace, monospace; color: var(--dim);
+           background: #232838; border-radius: 999px; padding: 0 6px; }
+  .tabs button[aria-selected="true"] .badge { color: var(--ink); }
+  /* Pending handoffs pull the eye to the tab even when its panel is not the one showing. */
+  .badge.urgent { color: #0b1220; background: var(--warn); font-weight: 600; }
+  section.panel { margin-top: 16px; }
+  /* The ledger earns the full width; a form for one account number does not. Panels that are
+     mostly fields are held to a readable measure instead of being stretched across a monitor. */
+  .panel.form .body { max-width: 720px; }
+  /* Capability cards tile into whatever width there is rather than each spanning the screen. */
+  #caps { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+          gap: 10px; align-items: start; }
+  #caps > .empty, #caps > .err { grid-column: 1 / -1; }
+  #caps .cap { margin-bottom: 0; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
   section > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
                  color: var(--dim); margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); }
@@ -80,7 +104,6 @@
   .confirm { border: 1px solid var(--bad); border-radius: 6px; padding: 10px 12px; margin-top: 10px;
              background: #1f1214; }
   .confirm p { margin: 0 0 8px; font-size: 12.5px; }
-  .wide { grid-column: 1 / -1; }
   .tiles { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
   .tile { flex: 1 1 120px; border: 1px solid var(--line); border-radius: 6px; padding: 8px 11px; }
   .tile .k { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
@@ -115,49 +138,32 @@
   <span class="sub" id="conn">connecting…</span>
 </header>
 
-<main>
-  <div>
-    <section id="handoffs" hidden>
-      <h2>Needs a human</h2>
-      <div class="body" id="handoffBody"></div>
-    </section>
-
-    <section style="margin-top:16px">
-      <h2>Capabilities</h2>
-      <div class="body">
-        <div class="search">
-          <input id="filter" placeholder="filter by id, name, description, status or risk…" />
-          <span class="count" id="count"></span>
-        </div>
-        <div id="caps"><div class="empty">loading…</div></div>
-      </div>
-    </section>
-
-    <section style="margin-top:16px">
-      <h2>Record a new capability</h2>
-      <div class="body">
-        <label>Goal</label>
-        <textarea id="goal" placeholder="Log in, then look up account 12678 and read its balance and account type."></textarea>
-        <label>Capability id (lower_snake_case)</label>
-        <input id="capId" placeholder="lookup_balance_discovered" />
-        <label>Inputs to parameterise — name=value, comma separated</label>
-        <input id="discInputs" placeholder="accountId=12678" />
-        <div class="actions">
-          <button class="primary" id="discoverBtn">Run discovery</button>
-        </div>
-        <p class="note">Uses a model and needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>.
-          The recorded artifact lands as a <strong>draft</strong>.</p>
-        <div class="err" id="discErr"></div>
-      </div>
-    </section>
-  </div>
-
-  <section>
-    <h2>Runs</h2>
-    <div class="body" id="runs"><div class="empty">nothing yet</div></div>
+<!-- Outside the tabs on purpose: a run waiting on a person is the one thing that must be
+     visible whichever panel is open. A handoff you can only see on one tab is a missed one. -->
+<div class="pinned">
+  <section id="handoffs" hidden>
+    <h2>Needs a human</h2>
+    <div class="body" id="handoffBody"></div>
   </section>
+</div>
 
-  <section class="wide">
+<nav class="tabs" role="tablist" aria-label="Console sections">
+  <button role="tab" id="tab-audit" data-tab="audit" aria-controls="panel-audit" aria-selected="true">
+    Audit <span class="badge" id="badgeAudit"></span>
+  </button>
+  <button role="tab" id="tab-runs" data-tab="runs" aria-controls="panel-runs" aria-selected="false" tabindex="-1">
+    Runs <span class="badge" id="badgeRuns"></span>
+  </button>
+  <button role="tab" id="tab-new" data-tab="new" aria-controls="panel-new" aria-selected="false" tabindex="-1">
+    New
+  </button>
+  <button role="tab" id="tab-capabilities" data-tab="capabilities" aria-controls="panel-capabilities" aria-selected="false" tabindex="-1">
+    Capabilities <span class="badge" id="badgeCaps"></span>
+  </button>
+</nav>
+
+<main>
+  <section class="panel" id="panel-audit" role="tabpanel" aria-labelledby="tab-audit">
     <h2>Audit — every run on disk, and what it cost</h2>
     <div class="body">
       <div class="tiles" id="auditTiles"></div>
@@ -173,6 +179,40 @@
       </div>
     </div>
   </section>
+
+  <section class="panel" id="panel-runs" role="tabpanel" aria-labelledby="tab-runs" hidden>
+    <h2>Runs</h2>
+    <div class="body" id="runs"><div class="empty">nothing yet</div></div>
+  </section>
+
+  <section class="panel form" id="panel-new" role="tabpanel" aria-labelledby="tab-new" hidden>
+    <h2>Record a new capability</h2>
+    <div class="body">
+      <label>Goal</label>
+      <textarea id="goal" placeholder="Log in, then look up account 12678 and read its balance and account type."></textarea>
+      <label>Capability id (lower_snake_case)</label>
+      <input id="capId" placeholder="lookup_balance_discovered" />
+      <label>Inputs to parameterise — name=value, comma separated</label>
+      <input id="discInputs" placeholder="accountId=12678" />
+      <div class="actions">
+        <button class="primary" id="discoverBtn">Run discovery</button>
+      </div>
+      <p class="note">Uses a model and needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>.
+        The recorded artifact lands as a <strong>draft</strong>.</p>
+      <div class="err" id="discErr"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-capabilities" role="tabpanel" aria-labelledby="tab-capabilities" hidden>
+    <h2>Capabilities</h2>
+    <div class="body">
+      <div class="search" style="max-width:720px">
+        <input id="filter" placeholder="filter by id, name, description, status or risk…" />
+        <span class="count" id="count"></span>
+      </div>
+      <div id="caps"><div class="empty">loading…</div></div>
+    </div>
+  </section>
 </main>
 
 <script type="module">
@@ -183,6 +223,44 @@
   const esc = (s) =>
     String(s ?? "").replace(/[&<>"']/g, (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+  // ── Tabs ───────────────────────────────────────────────────────────────────
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+
+  function showTab(name, { focus = false } = {}) {
+    for (const tab of tabs) {
+      const on = tab.dataset.tab === name;
+      tab.setAttribute("aria-selected", String(on));
+      // Only the selected tab is in the tab order; arrow keys move within the strip. That is
+      // the standard tablist contract, and without it Tab walks all four before the panel.
+      tab.tabIndex = on ? 0 : -1;
+      $(`panel-${tab.dataset.tab}`).hidden = !on;
+      if (on && focus) tab.focus();
+    }
+    // Survives the reload that follows editing an artifact or restarting the server, so the
+    // operator comes back to the panel they were working in.
+    try { localStorage.setItem("console.tab", name); } catch { /* private window, no matter */ }
+  }
+
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => showTab(tab.dataset.tab));
+    tab.addEventListener("keydown", (e) => {
+      const i = tabs.indexOf(tab);
+      const to =
+        e.key === "ArrowRight" ? (i + 1) % tabs.length
+        : e.key === "ArrowLeft" ? (i - 1 + tabs.length) % tabs.length
+        : e.key === "Home" ? 0
+        : e.key === "End" ? tabs.length - 1
+        : null;
+      if (to === null) return;
+      e.preventDefault();
+      showTab(tabs[to].dataset.tab, { focus: true });
+    });
+  }
+
+  let restored = null;
+  try { restored = localStorage.getItem("console.tab"); } catch { /* ignore */ }
+  showTab(tabs.some((t) => t.dataset.tab === restored) ? restored : "audit");
 
   // ── Capabilities ───────────────────────────────────────────────────────────
   let invalidEntries = [];
@@ -213,6 +291,8 @@
     $("count").textContent = query
       ? `${shown.length} of ${capabilities.length}`
       : `${capabilities.length}`;
+    // The tab badge counts what exists, never what a filter left showing.
+    $("badgeCaps").textContent = String(capabilities.length);
 
     $("caps").innerHTML =
       (capabilities.length === 0
@@ -334,6 +414,9 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ capabilityId: d.replay, inputs, headed: true }),
       });
+      // The run appears on another panel now. Without this, pressing Replay looks like
+      // nothing happened — the single worst thing tabs can do to a button that starts work.
+      showTab("runs");
       e.target.disabled = false;
       return;
     }
@@ -406,6 +489,9 @@
       body: JSON.stringify({ goal: $("goal").value, capabilityId: $("capId").value, inputs }),
     });
     if (!res.ok) $("discErr").textContent = (await res.json()).error ?? "failed to start";
+    // Only on success: a rejected start leaves the operator on this panel, next to the field
+    // that caused it and the error explaining why.
+    else showTab("runs");
     e.target.disabled = false;
   });
 
@@ -419,6 +505,12 @@
     const pending = list.filter((r) => r.intervention);
     $("handoffs").hidden = pending.length === 0;
     $("handoffBody").innerHTML = pending.map(renderHandoff).join("");
+
+    // The count says how many runs; the urgent styling says one of them is waiting on you.
+    // Both belong on the tab, because the panel that would otherwise say so may be hidden.
+    const badge = $("badgeRuns");
+    badge.textContent = pending.length > 0 ? `${pending.length} waiting` : String(list.length);
+    badge.classList.toggle("urgent", pending.length > 0);
   }
 
   function renderRun(r) {
@@ -540,6 +632,7 @@
     // The tiles always describe the whole ledger, never the filtered view: a total that
     // silently tracked a search box would be the easiest possible way to misread the bill.
     $("auditCount").textContent = query ? `${shown.length} of ${rows.length}` : `${rows.length}`;
+    $("badgeAudit").textContent = String(totals.runs);
 
     $("auditTiles").innerHTML = [
       ["runs", totals.runs],

@@ -209,6 +209,13 @@ exist**, **run one**, **record a new one**, **take over when a run stops for a h
 | **Review** | filter the list, add a reviewer note, promote a draft to `approved`, edit the raw artifact, or delete it |
 | **Audit** | the ledger over `evidence/` — every run on disk, how it ended, model calls, tokens and cost, with the same footnotes the CLI prints. Refreshes itself when a run finishes |
 
+Those are four tabs — Audit, Runs, New, Capabilities — with the count of each on its tab, and
+the last one you used remembered across reloads. Two things are deliberately not tabbed:
+**a run waiting on a person** stays pinned above the strip, because a handoff you can only see
+on one tab is a handoff you miss, and its tab badge turns amber and reads `1 waiting`. And
+**starting a run switches you to Runs**, because a button that starts work on a panel you
+cannot see looks like a button that did nothing.
+
 It is **not a co-browsing surface**. When a run hands over, the operator acts in the *real
 application's* browser window — the same live session the automation was using, which is the
 entire point of the handoff. The console carries the context and the decision, not the pixels.
