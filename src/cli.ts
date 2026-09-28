@@ -164,7 +164,7 @@ async function main(): Promise<void> {
     }
     const a = parsed.data;
     process.stdout.write(
-      `VALID  ${a.capabilityId} v${a.version}  [${a.metadata.status}, risk=${a.metadata.risk}]\n` +
+      `VALID  ${a.capabilityId} v${a.version}  [${a.metadata.status}, ${a.target.surface}, risk=${a.metadata.risk}]\n` +
         `  inputs   : ${Object.keys(a.inputs).join(", ") || "(none)"}\n` +
         `  outputs  : ${Object.keys(a.outputs).join(", ") || "(none)"}\n` +
         `  steps    : ${a.steps.length}\n` +
@@ -359,7 +359,7 @@ async function printCatalog(asJson: boolean): Promise<void> {
 
   process.stdout.write(`\n${entries.length} capability(ies) in ${CAPABILITIES_DIR}/\n\n`);
   for (const entry of entries) {
-    const flags = [entry.status, `risk=${entry.risk}`].join(", ");
+    const flags = [entry.status, entry.surface, `risk=${entry.risk}`].join(", ");
     process.stdout.write(`  ${entry.capabilityId}  v${entry.version}  [${flags}]\n`);
     process.stdout.write(`    ${entry.description}\n`);
     const inputs = Object.entries(entry.artifact.inputs)

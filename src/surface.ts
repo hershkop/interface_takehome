@@ -21,7 +21,7 @@ export const DEFAULT_MASK_SELECTORS: readonly string[] = [
   "[data-sensitive]",
 ];
 import { join } from "node:path";
-import type { Condition, Observation } from "./schema.js";
+import type { Condition, Observation, SurfaceKind } from "./schema.js";
 import { resolveTarget, explainFailure, type AttemptLog } from "./locator.js";
 import type { Target } from "./schema.js";
 
@@ -233,6 +233,34 @@ export interface RawHumanEvent {
   name?: string;
   id?: string;
   valueLength?: number;
+}
+
+/**
+ * The one surface kind this repository can actually drive.
+ *
+ * `Surface` is technology-neutral by design and a second implementation would only have to
+ * satisfy the same seven methods — but "neutral port" and "adapter exists" are different
+ * claims, and only the first one is true here.
+ */
+export const PLAYWRIGHT_SURFACE_KIND: SurfaceKind = "web";
+
+/**
+ * Why this capability cannot be launched with the surfaces that exist, or `undefined` if it can.
+ *
+ * Checked before a run starts rather than left to fail somewhere inside it: a desktop artifact
+ * handed to a browser resolves no locators and would otherwise come back as `TARGET_NOT_FOUND`
+ * on step one — a true error message about the wrong thing entirely.
+ */
+export function unsupportedSurfaceReason(
+  artifact: { target: { surface: SurfaceKind } },
+  available: SurfaceKind = PLAYWRIGHT_SURFACE_KIND,
+): string | undefined {
+  const wanted = artifact.target.surface;
+  if (wanted === available) return undefined;
+  return (
+    `this capability targets the ${wanted} surface, and no ${wanted} surface is implemented. ` +
+    `Only ${available} capabilities can run here.`
+  );
 }
 
 export class PlaywrightSurface implements Surface {

@@ -27,6 +27,7 @@ import {
   type Handler,
   type OutputDefinition,
   type Policy,
+  type SurfaceKind,
   type Target,
   type RiskClass,
   type RunError,
@@ -45,6 +46,7 @@ import {
   PlaywrightSurface,
   closeSurface,
   describeCondition,
+  unsupportedSurfaceReason,
   type Surface,
   type SurfaceFactory,
 } from "./surface.js";
@@ -80,6 +82,15 @@ export interface ReplayOptions {
    * policy, the ownership lock, evidence — knows or cares what it got back.
    */
   createSurface?: SurfaceFactory;
+  /**
+   * What kind of surface `createSurface` returns. Defaults to `web`, matching the default
+   * browser factory.
+   *
+   * Declared rather than detected: the port is deliberately opaque — nothing above it can ask
+   * a surface what it is — so the caller supplying one is the only party that knows, and a
+   * mismatch has to be caught before the run rather than guessed at during it.
+   */
+  surfaceKind?: SurfaceKind;
   /** Watch events as they are recorded. The console streams these to a browser. */
   onEvent?: (event: EvidenceEvent) => void;
   /**
@@ -157,6 +168,11 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
     );
   }
   const artifact = parsed.data;
+
+  // Before inputs, before secrets, before a surface is asked for: if this build cannot drive
+  // the kind of surface the capability targets, nothing downstream is worth attempting.
+  const unsupported = unsupportedSurfaceReason(artifact, options.surfaceKind ?? "web");
+  if (unsupported) return earlyFailure("ARTIFACT_INVALID", unsupported);
 
   const secrets = options.secrets ?? {};
   const inputs = validateInputs(artifact.inputs, options.inputs);

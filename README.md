@@ -204,7 +204,7 @@ exist**, **run one**, **record a new one**, **take over when a run stops for a h
 |---|---|
 | **Capabilities** | every artifact with its status, risk, step and handler counts, and a form generated from its declared inputs |
 | **Replay** | fill the inputs, run it, watch the events stream in, see the typed result |
-| **Record** | a goal and a capability id start a real discovery run; the recorded draft appears in the list when it finishes |
+| **Record** | a goal and a capability id start a real discovery run; the recorded draft appears in the list when it finishes. The panel explains what recording actually does, how to write a goal a model can follow, and — under **Desktop** — why there is nothing to record against yet |
 | **Handoff** | a run that escalates surfaces a card with the reason, the step, the page it stopped on, and the screenshot — plus the three decisions |
 | **Review** | filter the list, add a reviewer note, promote a draft to `approved`, edit the raw artifact, or delete it |
 | **Audit** | the ledger over `evidence/` — every run on disk, how it ended, model calls, tokens and cost, with the same footnotes the CLI prints. Refreshes itself when a run finishes |
@@ -554,6 +554,23 @@ accessible name is the one representation a modern web app, a legacy frameset, a
 desktop app can all produce. It is visibility-aware by construction, far smaller than the DOM,
 and it names controls the same way the recorded locators do — so a model reading it naturally
 proposes role+name targeting instead of brittle CSS.
+
+### A capability says which surface it needs
+
+`target.surface` is `web` or `desktop`, defaulting to `web` so every artifact written before
+the field stays valid. It is declared, never inferred from `baseUrl`: the steps are
+intent-level — *click the control whose accessible name is "Transfer"* — and read identically
+whichever surface carries them out, which is exactly why the artifact alone cannot tell you.
+
+It is not decorative. `replay()` compares it against the `surfaceKind` its caller declares
+(`web` by default, matching the browser factory) and refuses a mismatch **before** anything
+launches, naming the surface. Handing a desktop artifact to a browser otherwise fails as
+`TARGET_NOT_FOUND` on step one — a true error about entirely the wrong problem.
+
+**`desktop` is declarable and not runnable here.** No desktop surface is implemented; what
+exists is the port one would satisfy, and `test/surface-port.test.ts` replays a capability
+through a non-browser surface to show the seam holds — including, now, a desktop-declared
+artifact refused on the browser path and accepted when a caller supplies a desktop surface.
 
 ### Three schema decisions worth knowing up front
 
