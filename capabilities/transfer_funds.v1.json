@@ -11,6 +11,7 @@
     "recordedBy": "human"
   },
   "target": {
+    "surface": "web",
     "app": "parabank",
     "appFingerprint": "parasoft/parabank@sha256:8c08664c",
     "baseUrl": "http://localhost:18080/parabank"

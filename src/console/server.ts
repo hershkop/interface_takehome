@@ -26,6 +26,7 @@ import { discover } from "../discovery.js";
 import { loginToParabank } from "../parabank.js";
 import { RunRegistry, WebInterventionChannel } from "./runs.js";
 import { auditRuns } from "../audit.js";
+import { unsupportedSurfaceReason } from "../surface.js";
 
 const CAPABILITIES_DIR = "capabilities";
 const EVIDENCE_ROOT = resolvePath("evidence");
@@ -88,6 +89,7 @@ async function route(
         description: e.description,
         status: e.status,
         risk: e.risk,
+        surface: e.surface,
         path: e.path,
         inputs: e.artifact.inputs,
         outputs: e.artifact.outputs,
@@ -171,6 +173,11 @@ async function startReplay(
   const { entries } = await loadCatalog(CAPABILITIES_DIR);
   const entry = entries.find((e) => e.capabilityId === capabilityId);
   if (!entry) return send(res, 404, { error: `no capability "${capabilityId}"` });
+
+  // Refused before a run record exists: a capability this build cannot drive should not leave
+  // a failed run in the ledger, because nothing about the attempt was informative.
+  const unsupported = unsupportedSurfaceReason(entry.artifact);
+  if (unsupported) return send(res, 422, { error: unsupported });
 
   const run = registry.create("replay", `${entry.capabilityId} v${entry.version}`);
   send(res, 202, { runId: run.id });

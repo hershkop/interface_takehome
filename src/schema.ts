@@ -362,6 +362,13 @@ export function collectTargets(artifact: ArtifactShape): Array<{ where: string; 
 }
 // ─── The capability artifact ───────────────────────────────────────────────────
 
+/**
+ * The kinds of surface a capability can target. `web` is the only one with an implementation
+ * today; see `PLAYWRIGHT_SURFACE_KIND` and the refusal in `src/surface.ts`.
+ */
+export const SurfaceKind = z.enum(["web", "desktop"]);
+export type SurfaceKind = z.infer<typeof SurfaceKind>;
+
 export const CapabilityArtifact = z
   .object({
     schemaVersion: z.literal("1.0"),
@@ -404,6 +411,21 @@ export const CapabilityArtifact = z
 
     target: z.object({
       app: z.string().min(1),
+      /**
+       * Which kind of surface this capability drives.
+       *
+       * It exists because the artifact is the contract and the contract has to say what it
+       * needs to run: the steps are intent-level — *click the control named "Transfer"* — and
+       * read identically whether a browser or an OS accessibility tree carries them out, which
+       * is exactly why the artifact alone cannot tell you. Nothing infers it from `baseUrl`;
+       * a guess here is a run launched against the wrong kind of surface.
+       *
+       * Defaults to `web` so every artifact written before this field stays valid and keeps
+       * meaning what it meant. `desktop` is declarable and not yet runnable — no desktop
+       * surface is implemented — and the launch path refuses it by name rather than failing
+       * somewhere deeper with a locator error.
+       */
+      surface: SurfaceKind.default("web"),
       /**
        * Observed version/branding marker. Not used for matching — it is the drift signal:
        * a replay against a different fingerprint is worth flagging before it silently misbehaves.

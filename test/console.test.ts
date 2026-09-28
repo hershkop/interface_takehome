@@ -126,6 +126,8 @@ describe("console server", () => {
 
     const catalog = await (await fetch(`${url}/api/capabilities`)).json();
     expect(Array.isArray(catalog.capabilities)).toBe(true);
+    // The card shows which surface a capability drives, so the API has to carry it.
+    for (const c of catalog.capabilities) expect(["web", "desktop"]).toContain(c.surface);
   });
 
   it("serves four tabs, each with the panel it controls", async () => {

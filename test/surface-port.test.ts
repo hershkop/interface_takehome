@@ -3,7 +3,13 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replay } from "../src/replay.js";
-import { Policy, type Condition, type Observation, type Target } from "../src/schema.js";
+import {
+  CapabilityArtifact,
+  Policy,
+  type Condition,
+  type Observation,
+  type Target,
+} from "../src/schema.js";
 import type { ActionOutcome, CoordinateClickOutcome, Surface } from "../src/surface.js";
 
 /**
@@ -198,6 +204,69 @@ const artifact = {
   handlers: [],
   checkpoint: { kind: "text", value: "Account Details" },
 };
+
+describe("a capability declares the surface it needs", () => {
+  const desktopArtifact = { ...artifact, target: { ...artifact.target, surface: "desktop" } };
+
+  it("defaults an artifact that says nothing to web", () => {
+    // Every artifact written before the field existed still means what it meant.
+    const parsed = CapabilityArtifact.parse(artifact);
+    expect(parsed.target.surface).toBe("web");
+  });
+
+  it("refuses a desktop capability before it launches anything", async () => {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), "port-"));
+    let launched = false;
+
+    try {
+      const result = await replay({
+        artifact: desktopArtifact,
+        inputs: { accountId: "12345" },
+        secrets: { user: "operator" },
+        policy: Policy.parse({ allowedOrigins: ["http://app.test"] }),
+        evidenceRoot,
+        // Declares web, the default: this is the browser path every real caller takes.
+        createSurface: async () => {
+          launched = true;
+          return new FakeDesktopSurface();
+        },
+      });
+
+      expect(result.status).toBe("failure");
+      if (result.status === "failure") {
+        expect(result.error.code).toBe("ARTIFACT_INVALID");
+        // Named, not generic: handing this to a browser instead produces TARGET_NOT_FOUND on
+        // step one, which is a true message about entirely the wrong problem.
+        expect(result.error.message).toContain("desktop");
+      }
+      // The refusal is worth nothing if the surface was opened to discover it.
+      expect(launched).toBe(false);
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("runs that same capability once a caller supplies a desktop surface", async () => {
+    // The check gates on what the caller provides, not on a hardcoded "web only" rule — so the
+    // field marks a real requirement rather than banning a value outright.
+    const evidenceRoot = await mkdtemp(join(tmpdir(), "port-"));
+    try {
+      const result = await replay({
+        artifact: desktopArtifact,
+        inputs: { accountId: "12345" },
+        secrets: { user: "operator" },
+        policy: Policy.parse({ allowedOrigins: ["http://app.test"] }),
+        evidenceRoot,
+        createSurface: async () => new FakeDesktopSurface(),
+        surfaceKind: "desktop",
+      });
+
+      expect(result.status).toBe("success");
+    } finally {
+      await rm(evidenceRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
 
 describe("the Surface port is technology-neutral", () => {
   it("replays a capability through a surface that is not a browser", async () => {

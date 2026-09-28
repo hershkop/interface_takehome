@@ -10,7 +10,7 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
-import { CapabilityArtifact, type Policy, type RunResult } from "./schema.js";
+import { CapabilityArtifact, type Policy, type RunResult, type SurfaceKind } from "./schema.js";
 import { replay, type ReplayOptions } from "./replay.js";
 
 export interface CatalogEntry {
@@ -20,6 +20,8 @@ export interface CatalogEntry {
   description: string;
   status: "draft" | "approved";
   risk: "safe" | "approval_required" | "blocked";
+  /** Which kind of surface it drives. Only `web` has an implementation today. */
+  surface: SurfaceKind;
   path: string;
   artifact: CapabilityArtifact;
 }
@@ -64,6 +66,7 @@ export async function loadCatalog(
       description: parsed.data.metadata.description,
       status: parsed.data.metadata.status,
       risk: parsed.data.metadata.risk,
+      surface: parsed.data.target.surface,
       path,
       artifact: parsed.data,
     });

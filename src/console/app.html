@@ -32,6 +32,20 @@
   /* Pending handoffs pull the eye to the tab even when its panel is not the one showing. */
   .badge.urgent { color: #0b1220; background: var(--warn); font-weight: 600; }
   section.panel { margin-top: 16px; }
+  .chooser { display: flex; gap: 2px; margin-bottom: 14px; border: 1px solid var(--line);
+             border-radius: 6px; padding: 2px; width: max-content; }
+  .chooser button { border: 0; border-radius: 4px; padding: 5px 16px; color: var(--dim); }
+  .chooser button[aria-checked="true"] { background: #232838; color: var(--ink); }
+  .help { border: 1px solid var(--line); border-left: 2px solid var(--accent);
+          border-radius: 0 6px 6px 0; padding: 10px 14px; margin-bottom: 14px; background: #0e1016; }
+  .help summary { cursor: pointer; color: var(--ink); font-size: 12.5px; }
+  .help h3 { margin: 0 0 8px; font-size: 13px; color: var(--warn); }
+  .help p, .help li { font-size: 12.5px; color: var(--dim); }
+  .help p { margin: 8px 0; }
+  .help strong { color: var(--ink); font-weight: 600; }
+  .help ol { margin: 10px 0 0; padding-left: 18px; }
+  .help li { margin-bottom: 8px; }
+  .help code { background: #1a1d26; border-radius: 3px; padding: 0 4px; font-size: 11.5px; }
   /* The ledger earns the full width; a form for one account number does not. Panels that are
      mostly fields are held to a readable measure instead of being stretched across a monitor. */
   .panel.form .body { max-width: 720px; }
@@ -53,6 +67,10 @@
   .tag.approved { color: var(--ok); border-color: #2b5f47; }
   .tag.draft { color: var(--warn); border-color: #6b551a; }
   .tag.risk { color: var(--bad); border-color: #6b2f33; }
+  /* The surface a capability drives, stated rather than inferred from its baseUrl. `desktop`
+     is dimmed because it is declarable and not yet runnable here. */
+  .tag.surface.web { color: var(--accent); border-color: #2c4670; }
+  .tag.surface.desktop { color: var(--dim); border-style: dashed; }
   button { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
            border: 1px solid var(--line); background: #232838; color: var(--ink); }
   button:hover { border-color: var(--accent); }
@@ -188,6 +206,68 @@
   <section class="panel form" id="panel-new" role="tabpanel" aria-labelledby="tab-new" hidden>
     <h2>Record a new capability</h2>
     <div class="body">
+      <div class="chooser" role="radiogroup" aria-label="Surface to record against">
+        <button id="kindWeb" role="radio" aria-checked="true">Web</button>
+        <button id="kindDesktop" role="radio" aria-checked="false">Desktop</button>
+      </div>
+
+      <div id="newDesktop" hidden>
+        <div class="help">
+          <h3>No desktop surface is implemented</h3>
+          <p>You cannot record a desktop capability here yet, and nothing on this page will
+             pretend otherwise. What exists is the seam it would plug into.</p>
+          <p><strong>What would not change.</strong> The artifact. Steps are intent-level —
+             <em>click the control whose accessible name is “Transfer”</em> — and the observation
+             a model reasons over is already a role-and-name tree, which is what an OS
+             accessibility API exposes too. A recorded desktop flow would be the same shape of
+             document as a web one, with <code>target.surface</code> set to
+             <code>desktop</code>.</p>
+          <p><strong>What would have to be built.</strong> One implementation of the
+             <code>Surface</code> port — seven methods — over the platform accessibility and
+             input APIs, translating the same actions to accessibility nodes instead of
+             browser operations. Nothing above that port mentions a browser, so replay,
+             handlers, policy, the ownership lock and evidence would be unchanged.</p>
+          <p><strong>And one open question.</strong> Containment. The guard that keeps a web run
+             inside an allowlisted origin has no desktop equivalent — an application that can
+             reach the whole machine needs a different boundary before it is safe to let a model
+             explore one. That is a design problem, not a porting one.</p>
+          <p class="note">Until then, replay refuses a <code>desktop</code> artifact by name
+             rather than handing it to a browser and failing on the first locator.</p>
+        </div>
+      </div>
+
+      <div id="newWeb">
+      <details class="help" open>
+        <summary>How recording works, and how to write a goal it can follow</summary>
+        <ol>
+          <li><strong>A model drives the live app</strong> in a browser window you can watch.
+              It takes one action per turn and re-reads the screen in between, so it is never
+              deciding a second move from a page it has not seen. Every action is checked
+              against the policy <em>before</em> it runs — an origin outside the allowlist or a
+              control that looks irreversible is refused mid-run.</li>
+          <li><strong>You write the goal in plain language</strong>, naming concrete values:
+              <em>“Log in, then look up account 12678 and read its balance and account type.”</em>
+              Vague goals wander and hit the step limit. Say where to start, what to do, and
+              what to read at the end.</li>
+          <li><strong>Values you list as inputs get parameterised.</strong> Put
+              <code>accountId=12678</code> in the inputs field and the recorded artifact takes
+              <code>accountId</code> as an argument instead of hard-coding 12678 — including
+              where that value appears inside a locator or a condition, not just in a typed
+              value.</li>
+          <li><strong>What you get back is a draft</strong>: a step list with ordered locator
+              candidates, typed outputs, and <em>no handlers</em>. That is deliberate — a single
+              happy-path run cannot know how the application reports “no such record”, and
+              inventing handlers would be fiction.</li>
+          <li><strong>Then review it.</strong> On the Capabilities tab, read the steps, add the
+              handlers for the paths the run never took, leave a note saying what you checked,
+              and promote it to <code>approved</code>. A draft is hidden from the agent-facing
+              catalog until you do — a draft an agent can see is a draft it will call.</li>
+        </ol>
+        <p class="note">Needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>, the target app
+           reachable, and its origin allowed by the policy. A run costs real tokens; the Audit
+           tab shows what each one came to.</p>
+      </details>
+
       <label>Goal</label>
       <textarea id="goal" placeholder="Log in, then look up account 12678 and read its balance and account type."></textarea>
       <label>Capability id (lower_snake_case)</label>
@@ -197,9 +277,9 @@
       <div class="actions">
         <button class="primary" id="discoverBtn">Run discovery</button>
       </div>
-      <p class="note">Uses a model and needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>.
-        The recorded artifact lands as a <strong>draft</strong>.</p>
+      <p class="note">The recorded artifact lands as a <strong>draft</strong>.</p>
       <div class="err" id="discErr"></div>
+      </div>
     </div>
   </section>
 
@@ -258,6 +338,19 @@
     });
   }
 
+  // ── Surface chooser on the New tab ─────────────────────────────────────────
+  // Desktop is offered as a choice even though it cannot be recorded, because the honest
+  // answer to "can I automate my desktop app with this" is a paragraph, not a missing button.
+  function showKind(kind) {
+    const web = kind === "web";
+    $("kindWeb").setAttribute("aria-checked", String(web));
+    $("kindDesktop").setAttribute("aria-checked", String(!web));
+    $("newWeb").hidden = !web;
+    $("newDesktop").hidden = web;
+  }
+  $("kindWeb").addEventListener("click", () => showKind("web"));
+  $("kindDesktop").addEventListener("click", () => showKind("desktop"));
+
   let restored = null;
   try { restored = localStorage.getItem("console.tab"); } catch { /* ignore */ }
   showTab(tabs.some((t) => t.dataset.tab === restored) ? restored : "audit");
@@ -277,7 +370,7 @@
   /** Matches across every field someone might remember a capability by. */
   function matches(c, query) {
     if (!query) return true;
-    return [c.capabilityId, c.name, c.description, c.status, c.risk, c.notes]
+    return [c.capabilityId, c.name, c.description, c.status, c.risk, c.surface, c.notes]
       .filter(Boolean)
       .join(" ")
       .toLowerCase()
@@ -314,6 +407,7 @@
         <h3>${esc(id)}</h3>
         <div class="tags">
           <span class="tag ${c.status}">${esc(c.status)}</span>
+          <span class="tag surface ${esc(c.surface)}">${esc(c.surface)}</span>
           <span class="tag${c.risk === "safe" ? "" : " risk"}">risk: ${esc(c.risk)}</span>
           <span class="tag">v${esc(c.version)}</span>
           <span class="tag">${c.stepCount} steps</span>
