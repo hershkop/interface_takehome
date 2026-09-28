@@ -196,8 +196,9 @@ npm run cli -- replay capabilities/transfer_funds.v1.json \
 npm run console      # http://127.0.0.1:17080
 ```
 
-A local web console for the four things a person actually needs to do: **see what capabilities
-exist**, **run one**, **record a new one**, and **take over when a run stops for a human**.
+A local web console for the things a person actually needs to do: **see what capabilities
+exist**, **run one**, **record a new one**, **take over when a run stops for a human**, and
+**account for what it all cost**.
 
 | | |
 |---|---|
@@ -206,6 +207,14 @@ exist**, **run one**, **record a new one**, and **take over when a run stops for
 | **Record** | a goal and a capability id start a real discovery run; the recorded draft appears in the list when it finishes |
 | **Handoff** | a run that escalates surfaces a card with the reason, the step, the page it stopped on, and the screenshot — plus the three decisions |
 | **Review** | filter the list, add a reviewer note, promote a draft to `approved`, edit the raw artifact, or delete it |
+| **Audit** | the ledger over `evidence/` — every run on disk, how it ended, model calls, tokens and cost, with the same footnotes the CLI prints. Refreshes itself when a run finishes |
+
+Those are four tabs — Audit, Runs, New, Capabilities — with the count of each on its tab, and
+the last one you used remembered across reloads. Two things are deliberately not tabbed:
+**a run waiting on a person** stays pinned above the strip, because a handoff you can only see
+on one tab is a handoff you miss, and its tab badge turns amber and reads `1 waiting`. And
+**starting a run switches you to Runs**, because a button that starts work on a panel you
+cannot see looks like a button that did nothing.
 
 It is **not a co-browsing surface**. When a run hands over, the operator acts in the *real
 application's* browser window — the same live session the automation was using, which is the
@@ -255,6 +264,9 @@ Every run already writes a directory under `evidence/`. `audit` is the ledger ov
 npm run cli -- audit          # the table
 npm run cli -- audit --json   # the same rows, for a spreadsheet or a dashboard
 ```
+
+The operator console renders the same report at the bottom of the page (`GET /api/audit`), so
+it is one reader over one set of files rather than two accountings that can disagree.
 
 Shape of the output (the committed example runs pre-date token accounting, so their own rows
 read `—`):

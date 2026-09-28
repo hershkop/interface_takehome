@@ -1,8 +1,9 @@
 /**
  * A local operator console.
  *
- * Four jobs, matching the four things a person actually needs to do with this system: see what
- * capabilities exist, run one, record a new one, and take over when a run stops for a human.
+ * Five jobs, matching what a person actually needs to do with this system: see what
+ * capabilities exist, run one, record a new one, take over when a run stops for a human, and
+ * account for what all of it has cost.
  *
  * What it deliberately is not: a co-browsing surface. When a run hands over, the operator acts
  * in the real application's browser window — the same live session the automation was using,
@@ -24,6 +25,7 @@ import { replay } from "../replay.js";
 import { discover } from "../discovery.js";
 import { loginToParabank } from "../parabank.js";
 import { RunRegistry, WebInterventionChannel } from "./runs.js";
+import { auditRuns } from "../audit.js";
 
 const CAPABILITIES_DIR = "capabilities";
 const EVIDENCE_ROOT = resolvePath("evidence");
@@ -96,6 +98,13 @@ async function route(
       })),
       invalid,
     });
+  }
+
+  if (path === "/api/audit" && req.method === "GET") {
+    // Read from disk on every request rather than kept in memory: the console's own run list
+    // holds what this process started, and the point of the ledger is that it accounts for
+    // every run in the directory — including the ones a CLI invocation left there.
+    return send(res, 200, await auditRuns(EVIDENCE_ROOT));
   }
 
   if (path === "/api/runs" && req.method === "GET") {

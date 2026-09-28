@@ -128,6 +128,39 @@ describe("console server", () => {
     expect(Array.isArray(catalog.capabilities)).toBe(true);
   });
 
+  it("serves four tabs, each with the panel it controls", async () => {
+    const url = await start();
+    const page = await (await fetch(url)).text();
+
+    for (const name of ["audit", "runs", "new", "capabilities"]) {
+      expect(page).toContain(`data-tab="${name}"`);
+      expect(page).toContain(`id="panel-${name}"`);
+      expect(page).toContain(`aria-controls="panel-${name}"`);
+    }
+
+    // The handoff banner sits above the tab strip, not inside a panel. A run waiting on a
+    // person must be visible whichever tab is open, and nesting it would hide it behind three.
+    expect(page.indexOf('id="handoffs"')).toBeLessThan(page.indexOf('class="tabs"'));
+  });
+
+  it("serves the ledger over evidence/, totals and all", async () => {
+    const url = await start();
+    const res = await fetch(`${url}/api/audit`);
+    expect(res.status).toBe(200);
+
+    const report = await res.json();
+    expect(Array.isArray(report.rows)).toBe(true);
+    // The shape the page renders: without these the tiles read `undefined` rather than break.
+    expect(report.totals).toMatchObject({
+      runs: expect.any(Number),
+      modelCalls: expect.any(Number),
+      costUsd: expect.any(Number),
+      duplicates: expect.any(Number),
+      unaccounted: expect.any(Number),
+    });
+    expect(report.totals.tokens).toMatchObject({ input: expect.any(Number) });
+  });
+
   it("refuses to serve anything outside the evidence directory", async () => {
     // The path comes from a URL, so `../../.env` is a perfectly good request to make.
     const url = await start();
