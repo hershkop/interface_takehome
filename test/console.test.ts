@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { RunRegistry, WebInterventionChannel } from "../src/console/runs.js";
 import { startConsole } from "../src/console/server.js";
 import type { InterventionRequest } from "../src/schema.js";
@@ -251,6 +252,111 @@ describe("capability management", () => {
     expect(res.status).toBe(422);
     const payload = await res.json();
     expect(payload.issues.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * Saves that are *allowed* actually write to `capabilities/`, so the originals are put back.
+   * A test suite that leaves the repository edited is a test suite people stop running.
+   */
+  async function withRestoredCapabilities(run: () => Promise<void>): Promise<void> {
+    const dir = "capabilities";
+    const names = (await readdir(dir)).filter((f) => f.endsWith(".json"));
+    const before = new Map<string, string>();
+    for (const name of names) before.set(name, await readFile(join(dir, name), "utf8"));
+    try {
+      await run();
+    } finally {
+      for (const [name, body] of before) await writeFile(join(dir, name), body, "utf8");
+    }
+  }
+
+  const approvedCapability = async (url: string) => {
+    const { capabilities } = await (await fetch(`${url}/api/capabilities`)).json();
+    return capabilities.find((c: { status: string }) => c.status === "approved");
+  };
+
+  const put = (url: string, id: string, artifact: unknown) =>
+    fetch(`${url}/api/capabilities/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifact }),
+    });
+
+  it("refuses to change what an approved capability does without a new version", async () => {
+    // Approval is a statement that this exact behaviour was reviewed. Editing the steps while
+    // leaving the version alone makes that statement false for every agent already calling it,
+    // and leaves no signal anywhere that it happened.
+    const url = await start();
+    const approved = await approvedCapability(url);
+    if (!approved) return;
+
+    const edited = structuredClone(approved.artifact);
+    edited.steps[0].id = `${edited.steps[0].id}_tampered`;
+
+    const res = await put(url, approved.capabilityId, edited);
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain("Raise the version");
+  });
+
+  it("allows the same change once the version is raised", async () => {
+    await withRestoredCapabilities(async () => {
+      const url = await start();
+      const approved = await approvedCapability(url);
+      if (!approved) return;
+
+      const superseded = structuredClone(approved.artifact);
+      superseded.steps[0].id = `${superseded.steps[0].id}_v2`;
+      superseded.version = "1.0.1";
+
+      // The rule is not "approved is read-only" — it is "a change to what it does must be
+      // visible as a new version". The superseded revision stays in git history, which is
+      // where this repository already keeps older revisions.
+      expect((await put(url, approved.capabilityId, superseded)).status).toBe(200);
+    });
+  });
+
+  it("lets a reviewer annotate an approved capability without a version bump", async () => {
+    await withRestoredCapabilities(async () => {
+      const url = await start();
+      const approved = await approvedCapability(url);
+      if (!approved) return;
+
+      const annotated = structuredClone(approved.artifact);
+      annotated.metadata.notes = "Checked against the staging tenant on 2026-09-28.";
+
+      // A note changes what a reader knows, never what a run does. Forcing a version for it
+      // would make reviewers stop writing them.
+      expect((await put(url, approved.capabilityId, annotated)).status).toBe(200);
+    });
+  });
+
+  it("refuses to withdraw an approved capability to draft through the editor", async () => {
+    // Otherwise this is the way around the rule: withdraw, edit freely, re-approve, same
+    // version, no trace anywhere that the behaviour moved.
+    const url = await start();
+    const approved = await approvedCapability(url);
+    if (!approved) return;
+
+    const withdrawn = structuredClone(approved.artifact);
+    withdrawn.metadata.status = "draft";
+
+    const res = await put(url, approved.capabilityId, withdrawn);
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain("cannot be returned to draft");
+  });
+
+  it("leaves drafts editable in place, which is what a draft is for", async () => {
+    await withRestoredCapabilities(async () => {
+      const url = await start();
+      const { capabilities } = await (await fetch(`${url}/api/capabilities`)).json();
+      const draft = capabilities.find((c: { status: string }) => c.status === "draft");
+      if (!draft) return;
+
+      const edited = structuredClone(draft.artifact);
+      edited.metadata.description = "Reworded while still a draft.";
+
+      expect((await put(url, draft.capabilityId, edited)).status).toBe(200);
+    });
   });
 
   it("refuses to rename a capability through the editor", async () => {

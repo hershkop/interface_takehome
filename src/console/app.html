@@ -452,10 +452,21 @@
           placeholder="Why this was approved, what still needs handlers, anything a later reader needs.">${esc(c.notes ?? "")}</textarea>
         <div class="actions">
           <button data-save-notes="${esc(c.capabilityId)}">Save note</button>
-          <button ${draft ? 'class="primary"' : ""} data-toggle-status="${esc(c.capabilityId)}">
-            ${draft ? "Approve for unattended use" : "Return to draft"}
-          </button>
+          ${
+            draft
+              ? `<button class="primary" data-toggle-status="${esc(c.capabilityId)}">Approve for unattended use</button>`
+              : ""
+          }
         </div>
+        ${
+          // No "return to draft" for an approved capability. The server refuses it — it would
+          // be the way around version-on-change: withdraw, edit freely, re-approve, same
+          // version, no trace — so offering a button that always fails would only mislead.
+          draft
+            ? ""
+            : `<p class="note">Approved at v${esc(c.version)}. A change to what it does needs a
+               new version; a reviewer note does not.</p>`
+        }
         <label style="margin-top:12px">Full artifact — validated against the schema on save</label>
         <textarea data-json="${esc(c.capabilityId)}">${esc(JSON.stringify(c.artifact, null, 2))}</textarea>
         <div class="actions">

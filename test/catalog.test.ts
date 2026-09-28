@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadCatalog, toToolDefinition } from "../src/catalog.js";
+import { executableFingerprint, loadCatalog, toToolDefinition } from "../src/catalog.js";
+import { CapabilityArtifact } from "../src/schema.js";
 
 let dir: string;
 
@@ -224,5 +225,39 @@ describe("a capabilityId is a name, so it must be unique (PR10 review #1)", () =
     } finally {
       await rm(dir2, { recursive: true, force: true });
     }
+  });
+});
+
+describe("executableFingerprint", () => {
+  const parse = (over: Record<string, unknown> = {}) => CapabilityArtifact.parse(artifact(over));
+
+  it("ignores a reviewer note and the act of approving", () => {
+    const draft = parse({ metadata: { ...artifact().metadata, status: "draft" } });
+    const approved = parse({
+      metadata: { ...artifact().metadata, status: "approved", notes: "checked on staging" },
+    });
+
+    // Promotion and annotation change what a reader knows, never what a run does — so neither
+    // may look like a behavioural change that demands a new version.
+    expect(executableFingerprint(approved)).toBe(executableFingerprint(draft));
+  });
+
+  it("notices a change to what the capability actually does", () => {
+    const base = parse();
+    const steps = structuredClone(base.steps);
+    steps[0]!.id = "renamed_step";
+
+    expect(executableFingerprint(parse({ steps }))).not.toBe(executableFingerprint(base));
+  });
+
+  it("notices provenance being rewritten under an approved version", () => {
+    // An approved capability whose recording provenance quietly changed is one whose audit
+    // trail no longer matches the run that produced it.
+    const base = parse();
+    const relabelled = parse({
+      metadata: { ...artifact().metadata, recordedAt: "2020-01-01T00:00:00.000Z" },
+    });
+
+    expect(executableFingerprint(relabelled)).not.toBe(executableFingerprint(base));
   });
 });

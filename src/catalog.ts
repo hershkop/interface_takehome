@@ -10,6 +10,7 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { createHash } from "node:crypto";
 import { CapabilityArtifact, type Policy, type RunResult, type SurfaceKind } from "./schema.js";
 import { replay, type ReplayOptions } from "./replay.js";
 
@@ -184,4 +185,36 @@ export async function invoke(
   }
 
   return replay({ ...options, artifact: entry.artifact, inputs: args });
+}
+
+/**
+ * A fingerprint of everything in an artifact that decides what it *does*.
+ *
+ * Deliberately excludes two fields. `metadata.notes` is a reviewer's annotation — it changes
+ * what a reader knows, never what a run does. `metadata.status` is the act of publishing
+ * itself, and folding it in would make promoting a draft look like a behavioural change.
+ *
+ * Everything else is in, including provenance: an approved capability whose `recordedAt` or
+ * `model` quietly changed is one whose audit trail no longer matches the run that produced it,
+ * and that is worth a version too.
+ *
+ * Keys are sorted so the fingerprint follows the content rather than the order a JSON editor
+ * happened to leave the file in. Reformatting an artifact is not a change to it.
+ */
+export function executableFingerprint(artifact: CapabilityArtifact): string {
+  const { notes: _notes, status: _status, ...metadata } = artifact.metadata;
+  return createHash("sha256")
+    .update(canonical({ ...artifact, metadata }))
+    .digest("hex");
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
