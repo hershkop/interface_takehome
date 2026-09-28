@@ -624,6 +624,21 @@ export const RunError = z.object({
 });
 export type RunError = z.infer<typeof RunError>;
 
+/**
+ * Token counts as the Messages API reports them, accumulated across a run's model calls.
+ *
+ * Cache reads and cache writes are kept apart from plain input because they are billed at
+ * different multiples of the input rate — folding them together would misprice any run that
+ * used caching.
+ */
+export const TokenUsage = z.object({
+  input: z.number().int().min(0),
+  output: z.number().int().min(0),
+  cacheRead: z.number().int().min(0).default(0),
+  cacheWrite: z.number().int().min(0).default(0),
+});
+export type TokenUsage = z.infer<typeof TokenUsage>;
+
 export const EvidenceSummary = z.object({
   runId: z.string(),
   directory: z.string(),
@@ -645,6 +660,22 @@ export const EvidenceSummary = z.object({
    * write-up into a fact in the run record.
    */
   modelCalls: z.number().int().min(0),
+  /**
+   * Token usage, summed over every model response in the run. Absent on a run that made no
+   * model calls, and on runs recorded before this was captured — so a reader can tell
+   * "cost nothing" apart from "was never measured".
+   *
+   * Tokens, not dollars. What a run consumed is a fact about that run; what it cost is a
+   * function of a price list that changes independently, so the rate is applied at the point
+   * of display and old evidence is never invalidated by a repricing.
+   */
+  tokens: TokenUsage.optional(),
+  /**
+   * How many of those calls returned usage. Below `modelCalls` when a request threw, which
+   * makes `tokens` a floor rather than the full bill — stated as a number so a reader is not
+   * left to assume the accounting is complete.
+   */
+  modelResponses: z.number().int().min(0).optional(),
 });
 export type EvidenceSummary = z.infer<typeof EvidenceSummary>;
 
