@@ -87,6 +87,24 @@ export function collectAlerts(root: AxNode): string[] {
 }
 
 /**
+ * Every node in the tree, flattened, invisible ones included.
+ *
+ * Only for the one condition that opts into hidden content. Everything else uses `flatten`,
+ * because a surface that let hidden text satisfy a condition would report screens that were
+ * never shown — which is how a handler for "an internal error occurred" fires on a page that
+ * ships that string in a hidden div on every healthy run.
+ */
+export function flattenAll(root: AxNode): AxNode[] {
+  const all: AxNode[] = [];
+  const walk = (node: AxNode): void => {
+    all.push(node);
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(root);
+  return all;
+}
+
+/**
  * Every node in the tree, flattened, with invisible ones dropped.
  *
  * Used by locator resolution, which has to count matches before choosing one — the caller
