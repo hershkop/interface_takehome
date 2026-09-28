@@ -1,0 +1,9 @@
+{
+  "allowedOrigins": [],
+  "allowedApplications": ["com.example.DesktopBank"],
+  "allowedActions": ["navigate", "click", "fill", "select", "wait", "extract", "assert"],
+  "riskyControls": ["^transfer$", "^pay$", "confirm", "^delete", "withdraw"],
+  "maxSteps": 40,
+  "runTimeoutMs": 300000,
+  "redactPatterns": []
+}

@@ -6,13 +6,16 @@
  */
 import { readFile } from "node:fs/promises";
 import { config, defaultPolicy } from "./config.js";
-import { CapabilityArtifact, Policy, type RunResult } from "./schema.js";
+import { CapabilityArtifact, Policy, type RunResult, type SurfaceKind } from "./schema.js";
 import { replay } from "./replay.js";
 import { loginToParabank } from "./parabank.js";
 import { CliInterventionChannel } from "./handoff.js";
 import { discover } from "./discovery.js";
 import { invoke, loadCatalog, toToolDefinition } from "./catalog.js";
 import { auditRuns, formatCost } from "./audit.js";
+import { DesktopSurface } from "./desktop/surface.js";
+import type { SurfaceFactory } from "./surface.js";
+import { StdioDesktopTransport } from "./desktop/transport.js";
 import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
@@ -31,6 +34,7 @@ interface ParsedArgs {
   out: string | undefined;
   maxSteps: number | undefined;
   allowDraft: boolean;
+  desktopHelper: string | undefined;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -42,6 +46,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let capability: string | undefined;
   let out: string | undefined;
   let maxSteps: number | undefined;
+  let desktopHelper: string | undefined;
 
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -59,6 +64,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       capability = argv[++i];
     } else if (arg === "--out") {
       out = argv[++i];
+    } else if (arg === "--desktop-helper") {
+      desktopHelper = argv[++i];
     } else if (arg === "--max-steps") {
       maxSteps = Number.parseInt(argv[++i] ?? "", 10) || undefined;
     } else if (!arg.startsWith("-") && artifactPath === undefined) {
@@ -81,6 +88,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     out,
     maxSteps,
     allowDraft: argv.includes("--allow-draft"),
+    desktopHelper,
   };
 }
 
@@ -104,6 +112,11 @@ Options:
   --trace         Write a raw Playwright trace. UNREDACTED — see README.
   --json          Print the RunResult as JSON and nothing else.
   --allow-draft   invoke only: run a capability still marked draft.
+  --desktop-helper CMD
+                  Run against a desktop surface, driven by this helper process. The helper
+                  answers the seven requests in src/desktop/protocol.ts over stdio. No
+                  platform helper ships here; to see the path work, use the reference one:
+                    --desktop-helper "node scripts/desktop-helper-stub.mjs" 
 
 audit:
   Every run under evidence/, how it ended, and what it cost. Cost is computed from the
@@ -117,6 +130,48 @@ discover options:
   --max-steps N     Cap on model turns (default 25).
   Requires ANTHROPIC_API_KEY (put it in .env).
 `;
+
+/**
+ * Secrets available to a run, resolved from the environment at invocation time.
+ *
+ * Never from the artifact: an artifact stores secret *references*, and the value exists only
+ * here, for the length of the call. A secret that is not set is omitted rather than passed as
+ * an empty string — an empty string satisfies the artifact's "required" check and is then
+ * typed into the application as a blank password, which fails somewhere far less obvious.
+ */
+/**
+ * Surface options for a run, given whatever `--desktop-helper` was supplied.
+ *
+ * Shared by `replay` and `invoke` rather than written out at each call site, because the two
+ * diverging is precisely the bug this fixes: `invoke` is the agent-facing entry point, and an
+ * approved desktop capability it could list but never run is worse than one it cannot see.
+ */
+function surfaceOptions(
+  helperCommand: string | undefined,
+): { surfaceKind: SurfaceKind; createSurface: SurfaceFactory } | Record<string, never> {
+  const spec = helperCommand?.trim();
+  if (!spec) return {};
+  const [command, ...args] = spec.split(/\s+/);
+  if (command === undefined) return {};
+
+  return {
+    surfaceKind: "desktop",
+    createSurface: async () =>
+      new DesktopSurface({
+        transport: new StdioDesktopTransport({ command, args }),
+      }),
+  };
+}
+
+function cliSecrets(): Record<string, string> {
+  return {
+    parabankUsername: config.parabank.username,
+    parabankPassword: config.parabank.password,
+    ...(process.env.DESKTOP_APP_PASSWORD
+      ? { appPassword: process.env.DESKTOP_APP_PASSWORD }
+      : {}),
+  };
+}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -212,15 +267,17 @@ async function main(): Promise<void> {
     );
   }
 
+  // A desktop run swaps the surface and says so. Everything else about this call is identical,
+  // which is the whole claim the port makes.
   const result = await replay({
     artifact: raw,
     policy,
+    ...surfaceOptions(args.desktopHelper),
     ...(channel ? { interventionChannel: channel } : {}),
     ...(args.goal ? { goal: args.goal } : {}),
     inputs: args.inputs,
     secrets: {
-      parabankUsername: config.parabank.username,
-      parabankPassword: config.parabank.password,
+      ...cliSecrets(),
     },
     ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
     headed: args.headed,
@@ -398,10 +455,10 @@ async function runInvoke(args: ParsedArgs): Promise<void> {
   const result = await invoke(CAPABILITIES_DIR, capabilityId, args.inputs, {
     policy,
     allowDraft: args.allowDraft,
+    ...surfaceOptions(args.desktopHelper),
     ...(channel ? { interventionChannel: channel } : {}),
     secrets: {
-      parabankUsername: config.parabank.username,
-      parabankPassword: config.parabank.password,
+      ...cliSecrets(),
     },
     ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
     headed: args.headed,
@@ -462,8 +519,7 @@ async function runDiscovery(args: ParsedArgs): Promise<void> {
     policy,
     inputs: args.inputs,
     secrets: {
-      parabankUsername: config.parabank.username,
-      parabankPassword: config.parabank.password,
+      ...cliSecrets(),
     },
     ...(args.maxSteps === undefined ? {} : { maxSteps: args.maxSteps }),
     headed: args.headed,

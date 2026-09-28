@@ -213,26 +213,27 @@
 
       <div id="newDesktop" hidden>
         <div class="help">
-          <h3>No desktop surface is implemented</h3>
-          <p>You cannot record a desktop capability here yet, and nothing on this page will
-             pretend otherwise. What exists is the seam it would plug into.</p>
-          <p><strong>What would not change.</strong> The artifact. Steps are intent-level —
-             <em>click the control whose accessible name is “Transfer”</em> — and the observation
-             a model reasons over is already a role-and-name tree, which is what an OS
-             accessibility API exposes too. A recorded desktop flow would be the same shape of
-             document as a web one, with <code>target.surface</code> set to
-             <code>desktop</code>.</p>
-          <p><strong>What would have to be built.</strong> One implementation of the
-             <code>Surface</code> port — seven methods — over the platform accessibility and
-             input APIs, translating the same actions to accessibility nodes instead of
-             browser operations. Nothing above that port mentions a browser, so replay,
-             handlers, policy, the ownership lock and evidence would be unchanged.</p>
-          <p><strong>And one open question.</strong> Containment. The guard that keeps a web run
-             inside an allowlisted origin has no desktop equivalent — an application that can
-             reach the whole machine needs a different boundary before it is safe to let a model
-             explore one. That is a design problem, not a porting one.</p>
-          <p class="note">Until then, replay refuses a <code>desktop</code> artifact by name
-             rather than handing it to a browser and failing on the first locator.</p>
+          <h3>Desktop needs a platform helper running</h3>
+          <p>The desktop surface is implemented — <code>src/desktop/</code> drives a capability
+             over an accessibility tree the same way the browser surface drives one over a page.
+             What it needs is a <em>helper process</em> for your platform, answering seven
+             requests from macOS <code>AXUIElement</code>, Windows UI Automation or AT-SPI2.
+             None ships here.</p>
+          <p><strong>To try the path today</strong>, run the reference helper against its
+             pretend application — it speaks the same protocol a real one would:</p>
+          <p><code>npm run cli -- replay &lt;artifact&gt; --desktop-helper "node scripts/desktop-helper-stub.mjs"</code></p>
+          <p><strong>To record against a real application</strong>, write that helper, then point
+             the same flag at it. Nothing above the process boundary changes: a desktop artifact
+             is the same document as a web one with <code>target.surface</code> set to
+             <code>desktop</code>, and its steps still read <em>click the control whose
+             accessible name is “Transfer”</em>.</p>
+          <p><strong>Grant the permission first.</strong> Accessibility access is a per-app grant
+             the person has to give by hand — System Settings on macOS — and it cannot be
+             scripted. Until it is granted the helper sees an empty tree, which looks exactly
+             like an application with no controls.</p>
+          <p class="note">Policy governs desktop runs through <code>allowedApplications</code>
+             rather than <code>allowedOrigins</code>, matched on the application's identity and
+             never on its window title.</p>
         </div>
       </div>
 

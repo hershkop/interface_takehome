@@ -28,6 +28,7 @@ import type {
 } from "./schema.js";
 import type { ActionOutcome, CoordinateClickOutcome, Surface } from "./surface.js";
 import { globToRegExp } from "./surface.js";
+import { applicationOf } from "./location.js";
 
 export interface PolicyDecision {
   allowed: boolean;
@@ -59,6 +60,42 @@ export class PolicyGuard {
    * glob-based and only applies when patterns are configured; no patterns means any path under
    * an allowed origin.
    */
+  /**
+   * The desktop half of `checkUrl`: is this `app://` location an application we may be in?
+   *
+   * Matched on the application alone. A window title is content the application controls, and
+   * a containment check an attacker can rename their way past is not a containment check.
+   */
+  checkApplication(location: string): PolicyDecision {
+    const application = applicationOf(location);
+    if (application === undefined) {
+      // Fails closed. A location this guard cannot identify is one it cannot police, and
+      // "unrecognised" must never read as "fine".
+      return { allowed: false, reason: `not an application location: ${location}` };
+    }
+
+    if (!this.policy.allowedApplications.includes(application)) {
+      return {
+        allowed: false,
+        reason:
+          `application ${application} is not in the allowlist ` +
+          `(${this.policy.allowedApplications.join(", ") || "none configured"})`,
+      };
+    }
+
+    return ALLOWED;
+  }
+
+  /**
+   * Whichever check fits the kind of location this surface reports.
+   *
+   * The dispatch lives here, once, so no caller has to remember that an opaque surface needs a
+   * different question asked of it — which is exactly how the desktop path went unpoliced.
+   */
+  checkLocation(location: string, kind: "url" | "opaque"): PolicyDecision {
+    return kind === "url" ? this.checkUrl(location) : this.checkApplication(location);
+  }
+
   checkUrl(url: string): PolicyDecision {
     let parsed: URL;
     try {
@@ -254,16 +291,14 @@ export class GuardedSurface implements Surface {
    * design claim is about surfaces in general, not about ParaBank.
    */
   private checkLanding(): ActionOutcome | undefined {
-    // A surface whose locations are opaque cannot be policed by an origin allowlist. Skipping
-    // is not a loophole: `checkUrl` still rejects anything non-http on a `url` surface, so a
-    // browser cannot reach `data:` or `javascript:` by claiming to be opaque.
-    if (this.inner.locationKind !== "url") return undefined;
-
-    const url = this.inner.currentUrl();
-    if (url === "about:blank") return undefined;
-    const decision = this.guard.checkUrl(url);
+    // Both kinds of surface are policed, each by the check that fits it. This used to return
+    // early for anything opaque, which meant a desktop surface ran with no location check at
+    // all — the guard silently doing nothing rather than announcing it could not help.
+    const location = this.inner.currentUrl();
+    if (location === "about:blank") return undefined;
+    const decision = this.guard.checkLocation(location, this.inner.locationKind);
     if (decision.allowed) return undefined;
-    return this.deny(`after acting, the session was at ${url}: ${decision.reason}`);
+    return this.deny(`after acting, the session was at ${location}: ${decision.reason}`);
   }
 
   async navigate(url: string): Promise<ActionOutcome> {
@@ -271,8 +306,9 @@ export class GuardedSurface implements Surface {
     if (refused) return refused;
 
     // The destination is checked before the request, so a disallowed URL produces a precise
-    // refusal rather than an aborted-request error from the network guard.
-    const target = this.guard.checkUrl(url);
+    // refusal rather than an aborted-request error from the network guard. On a desktop
+    // surface the same call asks whether we may launch or focus that application.
+    const target = this.guard.checkLocation(url, this.inner.locationKind);
     if (!target.allowed) return this.deny(target.reason ?? `navigation to ${url} refused`);
 
     const result = await this.inner.navigate(url);
