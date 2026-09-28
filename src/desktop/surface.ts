@@ -22,9 +22,9 @@
  */
 import { applicationOf, desktopLocation, windowOf } from "../location.js";
 import type { Condition, Observation, Target } from "../schema.js";
-import type { ActionOutcome, CoordinateClickOutcome, Surface } from "../surface.js";
+import { globToRegExp, type ActionOutcome, type CoordinateClickOutcome, type Surface } from "../surface.js";
 import type { AxNode, DesktopTransport, DesktopWindow } from "./protocol.js";
-import { collectAlerts, flatten, renderAxSnapshot } from "./snapshot.js";
+import { collectAlerts, flatten, flattenAll, renderAxSnapshot } from "./snapshot.js";
 
 export interface DesktopSurfaceOptions {
   transport: DesktopTransport;
@@ -37,6 +37,12 @@ export interface DesktopSurfaceOptions {
    */
   maskRoles?: readonly string[];
   defaultTimeoutMs?: number;
+  /**
+   * How long the whole candidate chain is retried before a target is called unresolvable.
+   * Mirrors the browser resolver's default, so the two surfaces tolerate the same amount of
+   * an application being slow to repaint.
+   */
+  resolveTimeoutMs?: number;
 }
 
 const DEFAULT_MASK_ROLES = ["securetextfield", "passwordtextbox"] as const;
@@ -46,6 +52,15 @@ interface NodeQuery {
   role?: string;
   name?: string;
   text?: string;
+  /** Carried from the candidate. Names match as substrings unless the artifact says otherwise. */
+  exact?: boolean;
+}
+
+/** What a resolution attempt found, for an error message that names the way it failed. */
+interface Attempt {
+  describe: string;
+  matches: number;
+  error?: string;
 }
 
 const ok = (value?: string): ActionOutcome =>
@@ -58,12 +73,14 @@ export class DesktopSurface implements Surface {
   private readonly transport: DesktopTransport;
   private readonly maskRoles: readonly string[];
   private readonly defaultTimeoutMs: number;
+  private readonly resolveTimeoutMs: number;
   private where: DesktopWindow | undefined;
 
   constructor(options: DesktopSurfaceOptions) {
     this.transport = options.transport;
     this.maskRoles = options.maskRoles ?? DEFAULT_MASK_ROLES;
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 10_000;
+    this.resolveTimeoutMs = options.resolveTimeoutMs ?? 5_000;
   }
 
   // ── Observation ───────────────────────────────────────────────────────────
@@ -109,14 +126,15 @@ export class DesktopSurface implements Surface {
   }
 
   async click(target: Target): Promise<ActionOutcome> {
-    const query = this.toQuery(target);
-    if ("error" in query) return fail(query.error);
-
-    const resolved = await this.resolveExactlyOne(query.value);
+    const resolved = await this.resolveTarget(target);
     if ("error" in resolved) return fail(resolved.error);
 
     try {
-      await this.transport.request("click", query.value);
+      // Addressed by the handle the resolution issued, not by re-sending the query. Sending
+      // the query again would let the helper act on whatever matches *now*, which is the same
+      // wrong click the uniqueness check was there to prevent, arriving a moment later.
+      const { window } = await this.transport.request("click", { handle: resolved.handle });
+      this.where = window;
       return ok();
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
@@ -124,14 +142,15 @@ export class DesktopSurface implements Surface {
   }
 
   async fill(target: Target, value: string): Promise<ActionOutcome> {
-    const query = this.toQuery(target);
-    if ("error" in query) return fail(query.error);
-
-    const resolved = await this.resolveExactlyOne(query.value);
+    const resolved = await this.resolveTarget(target);
     if ("error" in resolved) return fail(resolved.error);
 
     try {
-      await this.transport.request("fill", { ...query.value, value });
+      const { window } = await this.transport.request("fill", {
+        handle: resolved.handle,
+        value,
+      });
+      this.where = window;
       return ok();
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
@@ -154,13 +173,10 @@ export class DesktopSurface implements Surface {
   }
 
   async extract(target: Target, attribute?: string): Promise<ActionOutcome> {
-    const query = this.toQuery(target);
-    if ("error" in query) return fail(query.error);
-
-    const resolved = await this.resolveExactlyOne(query.value);
+    const resolved = await this.resolveTarget(target);
     if ("error" in resolved) return fail(resolved.error);
 
-    const node = resolved.value;
+    const node = resolved.node;
     // A secure field's contents are never read out, whatever the artifact asked for. An
     // extract that quietly returned a password would put it in outputs, evidence and logs at
     // once, and no redactor downstream knows it was supposed to be secret.
@@ -183,7 +199,10 @@ export class DesktopSurface implements Surface {
 
   async clickAt(x: number, y: number): Promise<CoordinateClickOutcome> {
     try {
-      const { hit } = await this.transport.request("clickAt", { x, y });
+      const { hit, window } = await this.transport.request("clickAt", { x, y });
+      // A coordinate click can land anywhere, which is exactly why the location it left the
+      // session in has to be recorded before the guard checks it.
+      if (window) this.where = window;
       if (!hit) return { ok: true };
       // Reports what was under the cursor so discovery can turn a coordinate click into a real
       // locator — the same contract the browser surface has, for the same reason.
@@ -200,8 +219,11 @@ export class DesktopSurface implements Surface {
   // ── Conditions ────────────────────────────────────────────────────────────
 
   async verify(condition: Condition): Promise<boolean> {
-    const { tree } = await this.transport.request("observe", {});
-    return this.matches(condition, tree);
+    const { tree, window } = await this.transport.request("observe", {});
+    // Kept current while waiting: a condition that only becomes true after the application
+    // moves would otherwise be judged against where the session used to be.
+    this.where = window;
+    return this.matches(condition, tree, window);
   }
 
   async waitFor(condition: Condition, timeoutMs: number): Promise<ActionOutcome> {
@@ -213,57 +235,154 @@ export class DesktopSurface implements Surface {
     }
   }
 
-  private matches(condition: Condition, tree: AxNode): boolean {
+  /**
+   * The same condition semantics the browser evaluator implements, over an accessibility tree.
+   *
+   * All of them, including the composites. `all`, `any` and `not` are not exotic: `any` exists
+   * because a real flow settles into either a detail screen or a not-found screen, and a
+   * surface that answered `false` to every composite would wait out the whole timeout on the
+   * second path and report a timeout where the artifact had declared a business outcome.
+   */
+  private matches(condition: Condition, tree: AxNode, window: DesktopWindow): boolean {
     const nodes = flatten(tree);
+
     switch (condition.kind) {
-      case "text":
-        return nodes.some((n) => (n.name ?? n.value ?? "").includes(condition.value));
+      case "text": {
+        // `flatten` has already dropped invisible nodes, so the visible-only default holds by
+        // construction; `visible: false` opts back in to the whole tree, as on the browser.
+        const pool = condition.visible === false ? flattenAll(tree) : nodes;
+        return pool.some((n) => `${n.name ?? ""} ${n.value ?? ""}`.includes(condition.value));
+      }
       case "role":
         return nodes.some(
           (n) =>
             n.role.toLowerCase() === condition.role.toLowerCase() &&
-            (condition.name === undefined || (n.name ?? "") === condition.name),
+            (condition.name === undefined || (n.name ?? "").includes(condition.name)),
         );
-      case "urlPattern": {
-        // A window title is the nearest thing a desktop session has to a URL. Matched here and
-        // never in the policy guard: this is an artifact asserting where it expects to be,
-        // which is a different question from whether it is allowed to be there.
-        const location = this.currentUrl();
-        return location.includes(condition.value.replace(/\*/g, "")) ||
-          (windowOf(location) ?? "").includes(condition.value.replace(/\*/g, ""));
-      }
-      default:
-        return false;
+      case "urlPattern":
+        // The same glob matcher the browser path uses, against this surface's own location —
+        // so an artifact's expectation is expressed identically whichever surface runs it.
+        return globToRegExp(condition.value).test(
+          desktopLocation(window.application, window.window),
+        );
+      case "title":
+        return window.window.includes(condition.value);
+      case "all":
+        return condition.conditions.every((c) => this.matches(c, tree, window));
+      case "any":
+        return condition.conditions.some((c) => this.matches(c, tree, window));
+      case "not":
+        return !this.matches(condition.condition, tree, window);
     }
   }
 
   // ── Locators ──────────────────────────────────────────────────────────────
 
   /**
-   * The first candidate this surface can express, or why it can express none.
+   * Walks the candidate list in order and returns the first that resolves to exactly one
+   * visible node, with the handle to act on it.
    *
-   * Walked in the artifact's own order, so the preference the recording encoded — accessible
-   * role and name first — is honoured here exactly as it is in a browser.
+   * The same contract as the browser resolver, and for the same reasons. A candidate that
+   * matches nothing does not end the walk — that is what the ordered list is *for*, since a
+   * recording encodes a preference, not a single hope. A candidate that matches several does
+   * not end it either, but it is remembered, because "I found three" and "I found none" are
+   * different findings and a reader needs to know which one they are looking at.
+   *
+   * The whole chain is retried until a shared deadline: an application repainting after an
+   * action is ordinary, and checking each candidate once would reject a target that was about
+   * to resolve perfectly well.
    */
-  private toQuery(target: Target): { value: NodeQuery } | { error: string } {
+  private async resolveTarget(
+    target: Target,
+  ): Promise<{ node: AxNode; handle: string } | { error: string }> {
+    const queries = this.toQueries(target);
+    if (queries.usable.length === 0) {
+      // Nothing here could ever resolve, so there is nothing to wait for. Retrying an artifact
+      // whose every locator is meaningless on this surface just delays the same message.
+      return {
+        error: `no usable locator candidate for this surface: ${queries.refused.join("; ") || "none supplied"}`,
+      };
+    }
+
+    const deadline = Date.now() + this.resolveTimeoutMs;
+    for (;;) {
+      const attempts: Attempt[] = [];
+      let sawAmbiguous = false;
+
+      for (const { describe, query } of queries.usable) {
+        const { matches } = await this.transport.request("resolve", {
+          ...query,
+          visibleOnly: true,
+        });
+        attempts.push({ describe, matches: matches.length });
+
+        if (matches.length === 1) {
+          const node = matches[0]!;
+          if (node.handle === undefined) {
+            // A helper that matches but issues no handle cannot be acted on safely, and
+            // falling back to the query would be exactly the race this design removed.
+            return { error: `helper returned a match with no handle for ${describe}` };
+          }
+          return { node, handle: node.handle };
+        }
+        if (matches.length > 1) sawAmbiguous = true;
+      }
+
+      if (Date.now() >= deadline) {
+        const detail = attempts.map((a) => `${a.describe} → ${a.matches}`).join("; ");
+        return {
+          error: sawAmbiguous
+            ? `refusing to guess: a candidate matched more than one element (${detail})`
+            : `no element matched any candidate (${detail})`,
+        };
+      }
+      await new Promise((resume) => setTimeout(resume, 100));
+    }
+  }
+
+  /**
+   * The candidates this surface can express, in the artifact's own order, plus why the rest
+   * were refused.
+   *
+   * `css` and `testId` are named rather than skipped: a web artifact replayed here should say
+   * which of its locators cannot survive the move, not fail with "not found" and send a reader
+   * looking for a control that was never missing.
+   */
+  private toQueries(target: Target): {
+    usable: { describe: string; query: NodeQuery }[];
+    refused: string[];
+  } {
+    const usable: { describe: string; query: NodeQuery }[] = [];
     const refused: string[] = [];
+
     for (const candidate of target.candidates) {
       switch (candidate.strategy) {
         case "role":
-          return {
-            value: {
+          usable.push({
+            describe: `role=${candidate.role} name=${JSON.stringify(candidate.name)}${candidate.exact ? " (exact)" : ""}`,
+            query: {
               role: candidate.role,
-              ...(candidate.name === undefined ? {} : { name: candidate.name }),
+              name: candidate.name,
+              // Carried through, not dropped. The schema defaults `exact` to false, so a
+              // helper left to assume equality would silently narrow every recorded locator.
+              exact: candidate.exact,
             },
-          };
+          });
+          break;
         case "label":
-          return { value: { name: candidate.value } };
+          usable.push({
+            describe: `label=${JSON.stringify(candidate.value)}`,
+            query: { name: candidate.value },
+          });
+          break;
         case "text":
-          return { value: { text: candidate.value } };
+          usable.push({
+            describe: `text=${JSON.stringify(candidate.value)}`,
+            query: { text: candidate.value },
+          });
+          break;
         case "css":
         case "testId":
-          // Named rather than skipped: a web artifact replayed on a desktop surface should say
-          // which of its locators cannot survive the move, not fail with "not found".
           refused.push(`${candidate.strategy} has no meaning on an accessibility tree`);
           break;
         case "coordinates":
@@ -271,24 +390,7 @@ export class DesktopSurface implements Surface {
           break;
       }
     }
-    return {
-      error: `no usable locator candidate for this surface: ${refused.join("; ") || "none supplied"}`,
-    };
-  }
-
-  /** Exactly one visible match, or a refusal naming which way it failed. */
-  private async resolveExactlyOne(
-    query: NodeQuery,
-  ): Promise<{ value: AxNode } | { error: string }> {
-    const { matches } = await this.transport.request("resolve", { ...query, visibleOnly: true });
-    const described = JSON.stringify(query);
-
-    if (matches.length === 0) return { error: `no element matched ${described}` };
-    if (matches.length > 1) {
-      // Ambiguity is a failure, not a coin toss. Same rule as the browser path.
-      return { error: `${matches.length} elements matched ${described}; refusing to guess` };
-    }
-    return { value: matches[0]! };
+    return { usable, refused };
   }
 
   // ── Evidence and lifecycle ────────────────────────────────────────────────

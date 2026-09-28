@@ -628,9 +628,18 @@ quality drops with no error anywhere — which is also the clearest vindication 
 ARIA tree over a DOM dump: a browser and an OS accessibility API are two producers of the same
 thing, so this is a renderer, not a translation layer.
 
-**Resolution stays on this side.** The helper returns every match and `DesktopSurface` enforces
-the same exactly-one-visible-match rule the browser path does. A helper that returned "the
-first of three" would turn replay's refusal to guess into a wrong click.
+**Resolution stays on this side, and the action it authorises is tied to it.** The helper
+returns every match with an opaque handle, `DesktopSurface` walks the candidate list in order
+and takes the first that resolves to exactly one visible node, and the mutation then addresses
+that *handle* — never the query again. Re-sending the query would reopen the gap the uniqueness
+check exists to close: the tree can change between the two requests, and the helper would act
+on whatever matches now. A handle issued against a screen that has since changed is refused,
+not re-matched.
+
+**Locations are never one action stale.** Every request that can change the screen returns the
+window it left the session in. The landing check that keeps a run inside its allowlist reads
+that value, and one action of staleness is one action executed in an application nobody
+checked — an allowed app whose button switches to another one would otherwise pass.
 
 **Two locator strategies cannot cross.** `css` and `testId` mean nothing to an accessibility
 tree, and are refused *by name* rather than skipped — a web artifact replayed on desktop should

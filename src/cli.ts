@@ -6,7 +6,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { config, defaultPolicy } from "./config.js";
-import { CapabilityArtifact, Policy, type RunResult } from "./schema.js";
+import { CapabilityArtifact, Policy, type RunResult, type SurfaceKind } from "./schema.js";
 import { replay } from "./replay.js";
 import { loginToParabank } from "./parabank.js";
 import { CliInterventionChannel } from "./handoff.js";
@@ -14,6 +14,7 @@ import { discover } from "./discovery.js";
 import { invoke, loadCatalog, toToolDefinition } from "./catalog.js";
 import { auditRuns, formatCost } from "./audit.js";
 import { DesktopSurface } from "./desktop/surface.js";
+import type { SurfaceFactory } from "./surface.js";
 import { StdioDesktopTransport } from "./desktop/transport.js";
 import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
@@ -138,6 +139,30 @@ discover options:
  * an empty string — an empty string satisfies the artifact's "required" check and is then
  * typed into the application as a blank password, which fails somewhere far less obvious.
  */
+/**
+ * Surface options for a run, given whatever `--desktop-helper` was supplied.
+ *
+ * Shared by `replay` and `invoke` rather than written out at each call site, because the two
+ * diverging is precisely the bug this fixes: `invoke` is the agent-facing entry point, and an
+ * approved desktop capability it could list but never run is worse than one it cannot see.
+ */
+function surfaceOptions(
+  helperCommand: string | undefined,
+): { surfaceKind: SurfaceKind; createSurface: SurfaceFactory } | Record<string, never> {
+  const spec = helperCommand?.trim();
+  if (!spec) return {};
+  const [command, ...args] = spec.split(/\s+/);
+  if (command === undefined) return {};
+
+  return {
+    surfaceKind: "desktop",
+    createSurface: async () =>
+      new DesktopSurface({
+        transport: new StdioDesktopTransport({ command, args }),
+      }),
+  };
+}
+
 function cliSecrets(): Record<string, string> {
   return {
     parabankUsername: config.parabank.username,
@@ -244,21 +269,10 @@ async function main(): Promise<void> {
 
   // A desktop run swaps the surface and says so. Everything else about this call is identical,
   // which is the whole claim the port makes.
-  const desktop = args.desktopHelper?.trim();
-  const [helperCommand, ...helperArgs] = desktop ? desktop.split(/\s+/) : [];
-
   const result = await replay({
     artifact: raw,
     policy,
-    ...(helperCommand
-      ? {
-          surfaceKind: "desktop" as const,
-          createSurface: async () =>
-            new DesktopSurface({
-              transport: new StdioDesktopTransport({ command: helperCommand, args: helperArgs }),
-            }),
-        }
-      : {}),
+    ...surfaceOptions(args.desktopHelper),
     ...(channel ? { interventionChannel: channel } : {}),
     ...(args.goal ? { goal: args.goal } : {}),
     inputs: args.inputs,
@@ -441,6 +455,7 @@ async function runInvoke(args: ParsedArgs): Promise<void> {
   const result = await invoke(CAPABILITIES_DIR, capabilityId, args.inputs, {
     policy,
     allowDraft: args.allowDraft,
+    ...surfaceOptions(args.desktopHelper),
     ...(channel ? { interventionChannel: channel } : {}),
     secrets: {
       ...cliSecrets(),

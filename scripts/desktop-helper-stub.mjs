@@ -85,6 +85,44 @@ const screens = {
 
 const current = () => screens[state.screen]();
 
+const where = () => ({ application: APPLICATION, window: current().window });
+
+// ── Handles ────────────────────────────────────────────────────────────────
+//
+// `resolve` issues one per match and `click`/`fill` consume it, so a mutation acts on the node
+// that was checked for uniqueness rather than on whatever matches when the second request
+// lands. Handles are scoped to a generation that bumps whenever the screen changes: a handle
+// from before the change refers to a node the caller never verified, so it is refused rather
+// than quietly re-matched.
+
+let generation = 0;
+let handleSeq = 0;
+const handles = new Map();
+
+function issueHandle(node) {
+  const handle = `h${generation}:${++handleSeq}`;
+  handles.set(handle, { generation, node });
+  return handle;
+}
+
+function nodeFor(handle) {
+  const entry = handles.get(handle);
+  if (!entry) throw new Error(`unknown handle: ${handle}`);
+  if (entry.generation !== generation) {
+    throw new Error(`stale handle: ${handle} (the screen changed after it was resolved)`);
+  }
+  return entry.node;
+}
+
+/** Any change to what is on screen invalidates every handle issued against the old one. */
+function changeScreen(next) {
+  if (next !== state.screen) {
+    state.screen = next;
+    generation++;
+    handles.clear();
+  }
+}
+
 /** Every visible node, flattened — the helper's own view of what it could match. */
 function flatten(node, out = []) {
   if (node.visible === false) return out;
@@ -97,28 +135,30 @@ function flatten(node, out = []) {
  * Every node matching a query. Deliberately returns all of them: choosing among several is the
  * caller's job, and a helper that returned "the first" would defeat replay's refusal to guess.
  */
-function matchAll({ role, name, text }) {
+function matchAll({ role, name, text, exact }) {
   return flatten(current().tree).filter((node) => {
     if (role !== undefined && node.role.toLowerCase() !== role.toLowerCase()) return false;
-    if (name !== undefined && (node.name ?? "") !== name) return false;
+    if (name !== undefined) {
+      // Substring by default, equality when the candidate asked for it — the artifact's own
+      // locator semantics. Always comparing exactly would silently narrow every recorded name.
+      const candidate = node.name ?? "";
+      if (exact ? candidate !== name : !candidate.includes(name)) return false;
+    }
     if (text !== undefined && !`${node.name ?? ""}${node.value ?? ""}`.includes(text)) return false;
     return true;
   });
 }
 
 /** Acting on the pretend app: what a click actually does to its state. */
-function act(query) {
-  const [hit] = matchAll(query);
-  if (!hit) throw new Error(`nothing to click for ${JSON.stringify(query)}`);
-
-  if (hit.name === "Log In" && state.screen === "login") {
+function act(node) {
+  if (node.name === "Log In" && state.screen === "login") {
     if (state.username === "" || state.password === "") throw new Error("credentials required");
-    state.screen = "overview";
+    changeScreen("overview");
     return;
   }
-  if (hit.name === "Find" && state.screen === "overview") {
+  if (node.name === "Find" && state.screen === "overview") {
     state.account = state.find;
-    state.screen = state.find === "99999" ? "notFound" : "detail";
+    changeScreen(state.find === "99999" ? "notFound" : "detail");
   }
 }
 
@@ -127,33 +167,35 @@ function act(query) {
 const handlers = {
   focus({ application }) {
     if (application !== APPLICATION) throw new Error(`no such application: ${application}`);
-    return { application: APPLICATION, window: current().window };
+    return where();
   },
   observe() {
     const { window, tree } = current();
     return { window: { application: APPLICATION, window }, tree };
   },
   resolve(params) {
-    return { matches: matchAll(params) };
+    // Every match, each with a handle. Choosing among them is the caller's job.
+    return { matches: matchAll(params).map((node) => ({ ...node, handle: issueHandle(node) })) };
   },
-  click(params) {
-    act(params);
-    return {};
+  click({ handle }) {
+    act(nodeFor(handle));
+    // The window the click left the session in, so the caller's location is never one action
+    // out of date when the policy guard reads it.
+    return { window: where() };
   },
-  fill({ value, ...query }) {
-    const [hit] = matchAll(query);
-    if (!hit) throw new Error(`nothing to fill for ${JSON.stringify(query)}`);
-    if (hit.name === "Username") state.username = value;
-    if (hit.name === "Password") state.password = value;
-    if (hit.name === "Account Number" && state.screen === "overview") state.find = value;
-    return {};
+  fill({ handle, value }) {
+    const node = nodeFor(handle);
+    if (node.name === "Username") state.username = value;
+    if (node.name === "Password") state.password = value;
+    if (node.name === "Account Number" && state.screen === "overview") state.find = value;
+    return { window: where() };
   },
   clickAt({ x, y }) {
     // No geometry in the stub: coordinates land on nothing, which is the honest answer and
     // still exercises discovery's "could not derive a locator" path.
     void x;
     void y;
-    return {};
+    return { window: where() };
   },
   screenshot({ maskRoles }) {
     // A real helper renders the window with those roles painted over. The stub returns a

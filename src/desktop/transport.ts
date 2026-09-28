@@ -49,13 +49,41 @@ export class StdioDesktopTransport implements DesktopTransport {
     // reason. Left to the per-request timeout instead, a crashed helper would look like a slow
     // application and every step would wait out the clock before failing with nothing useful.
     this.child.on("exit", (code, signal) => {
-      this.exited = `desktop helper exited (${signal ?? `code ${code}`})`;
-      for (const [id, waiter] of this.pending) {
-        clearTimeout(waiter.timer);
-        waiter.reject(new Error(this.exited));
-        this.pending.delete(id);
-      }
+      this.fatal(`desktop helper exited (${signal ?? `code ${code}`})`);
     });
+
+    // `error` fires when the helper cannot be spawned at all — a missing binary, a file that
+    // is not executable, a bad interpreter. Node treats an unhandled `error` on a child as an
+    // uncaught exception, so without this a mistyped --desktop-helper takes the whole process
+    // down with `spawn ENOENT` instead of returning a structured run failure.
+    this.child.on("error", (err) => {
+      this.fatal(`desktop helper could not be started: ${err.message}`);
+    });
+
+    // A helper that exits while a request is being written makes stdin emit EPIPE, which is
+    // the same class of problem arriving down a different pipe.
+    this.child.stdin.on("error", (err) => {
+      this.fatal(`desktop helper stdin failed: ${err.message}`);
+    });
+
+    // stdout/stderr can error the same way, and an unhandled one is equally fatal.
+    this.child.stdout.on("error", () => this.fatal("desktop helper stdout failed"));
+    this.child.stderr.on("error", () => undefined);
+  }
+
+  /**
+   * The helper is gone. Fail everything waiting on it now, with a reason.
+   *
+   * Left to the per-request timeout instead, a dead helper looks like a slow application: every
+   * step waits out the clock and then fails saying nothing useful about why.
+   */
+  private fatal(reason: string): void {
+    this.exited ??= reason;
+    for (const [id, waiter] of this.pending) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error(this.exited));
+      this.pending.delete(id);
+    }
   }
 
   /** Whatever the helper wrote to stderr. Diagnostics for a helper that will not start. */
@@ -101,7 +129,15 @@ export class StdioDesktopTransport implements DesktopTransport {
         reject,
         timer,
       });
-      this.child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+      // Guarded: a write to a closed pipe throws synchronously, and inside a Promise executor
+      // that rejects this request — which is right — but the pending entry would leak.
+      try {
+        this.child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+      } catch (err) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 

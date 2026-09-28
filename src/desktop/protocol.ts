@@ -14,12 +14,31 @@
  * ambiguity, and a helper that helpfully returned "the first one" would turn a refusal into a
  * wrong click.
  *
+ * **Mutations address a handle, never a query.** `resolve` issues an opaque handle per match
+ * and `click`/`fill` consume it. Re-sending the query would reopen the gap the uniqueness check
+ * exists to close: the tree can change between the two requests, and the helper would then act
+ * on whatever matches *now* — turning a refusal to guess into a wrong click by a different
+ * route. A handle whose node is gone must be refused, not re-matched.
+ *
+ * **Mutations report where they left the session.** Every request that can change the screen
+ * returns the resulting window, so the caller's idea of which application it is in is never
+ * older than its last action. The landing check that keeps a run inside its allowlist reads
+ * that value, and one action of staleness is one action executed in an unchecked application.
+ *
  * **Report the tree as it is.** `observe` returns the accessibility tree with no filtering
  * beyond visibility. What a model is allowed to see is decided above, by the redactor.
  */
 
 /** One node in the platform's accessibility tree. */
 export interface AxNode {
+  /**
+   * Opaque identifier for this node, issued by `resolve` and consumed by `click` and `fill`.
+   *
+   * Opaque on purpose: a caller that could construct one would be sending a query by another
+   * name. A helper invalidates handles whenever the tree changes, so a stale handle is an
+   * error rather than a fresh match against a screen the caller has not checked.
+   */
+  handle?: string;
   /** Platform role, normalised to the web vocabulary: button, textbox, link, heading… */
   role: string;
   /** The accessible name — what a screen reader would announce. */
@@ -54,20 +73,23 @@ export interface DesktopRequests {
   focus: { params: { application: string }; result: DesktopWindow };
   /** The current window, and its accessibility tree. */
   observe: { params: Record<string, never>; result: { window: DesktopWindow; tree: AxNode } };
-  /** Every node matching a query. See "report matches, do not pick one" above. */
+  /**
+   * Every node matching a query, each carrying a handle. See "report matches" above.
+   *
+   * `exact` mirrors the artifact's own locator semantics: a recorded name matches as a
+   * substring by default and by equality when the candidate says so. A helper that always
+   * compared exactly would silently narrow every locator ever recorded.
+   */
   resolve: {
-    params: { role?: string; name?: string; text?: string; visibleOnly: boolean };
+    params: { role?: string; name?: string; text?: string; exact?: boolean; visibleOnly: boolean };
     result: { matches: AxNode[] };
   };
-  /** Click a node previously returned by `resolve`, addressed the same way. */
-  click: { params: { role?: string; name?: string; text?: string }; result: Record<string, never> };
+  /** Click the node a handle names. Reports the window the click left the session in. */
+  click: { params: { handle: string }; result: { window: DesktopWindow } };
   /** Set a control's value. The helper types it; it does not paste, so the app sees key events. */
-  fill: {
-    params: { role?: string; name?: string; text?: string; value: string };
-    result: Record<string, never>;
-  };
+  fill: { params: { handle: string; value: string }; result: { window: DesktopWindow } };
   /** Click raw screen coordinates and report what was under the cursor. */
-  clickAt: { params: { x: number; y: number }; result: { hit?: AxNode } };
+  clickAt: { params: { x: number; y: number }; result: { hit?: AxNode; window: DesktopWindow } };
   /**
    * A PNG of the focused window, with the listed regions already painted over.
    *
