@@ -283,6 +283,7 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
         tool_choice: { type: "auto", disable_parallel_tool_use: true },
         messages,
       });
+      recorder.recordUsage(response.usage);
       messages.push({ role: "assistant", content: response.content });
 
       const calls = response.content.filter(
@@ -418,6 +419,10 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
     await recorder.event({ type: "discovery.failed", detail: { reason } });
     return { status: "failed", reason, evidenceDir: recorder.directory, modelCalls };
   } finally {
+    // In `finally` because every exit from this function — recorded, stuck, failed, or thrown
+    // — spent the same money, and an audit that only accounts for successful runs is the one
+    // that understates the bill.
+    await recorder.writeUsage().catch(() => {});
     if (surface) {
       const closed = await closeSurface(surface);
       if (!closed.ok) {

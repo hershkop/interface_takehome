@@ -11,7 +11,7 @@
  */
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { EvidenceSummary, Observation, RunResult } from "./schema.js";
+import type { EvidenceSummary, Observation, RunResult, TokenUsage } from "./schema.js";
 import { redactDeep, type Redactor } from "./redact.js";
 
 export type RunPhase = "discovery" | "replay" | "human";
@@ -59,6 +59,9 @@ export class EvidenceRecorder {
   private readonly onEvent: ((event: EvidenceEvent) => void) | undefined;
   private readonly screenshots: string[] = [];
   private modelCalls = 0;
+  private readonly tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  /** Distinguishes "no usage was reported" from "usage was reported and was zero". */
+  private sawUsage = false;
   private tracePath: string | undefined;
   private failureSnapshotPath: string | undefined;
   private humanActionsPath: string | undefined;
@@ -154,6 +157,26 @@ export class EvidenceRecorder {
     this.modelCalls++;
   }
 
+  /**
+   * Called with each model response's reported usage. Separate from `recordModelCall` because
+   * the two are recorded at different moments: the call is counted before the request goes out,
+   * so a request that throws still shows up in the audit, but only a response carries usage.
+   *
+   * Counts are accumulated raw. Pricing lives at the display edge — see `priceRun` in config.
+   */
+  recordUsage(usage: {
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
+    cache_creation_input_tokens?: number | null;
+  }): void {
+    this.tokens.input += usage.input_tokens ?? 0;
+    this.tokens.output += usage.output_tokens ?? 0;
+    this.tokens.cacheRead += usage.cache_read_input_tokens ?? 0;
+    this.tokens.cacheWrite += usage.cache_creation_input_tokens ?? 0;
+    this.sawUsage = true;
+  }
+
   get modelCallCount(): number {
     return this.modelCalls;
   }
@@ -169,6 +192,7 @@ export class EvidenceRecorder {
       failureSnapshot: this.failureSnapshotPath,
       ...(this.humanActionsPath ? { humanActions: this.humanActionsPath } : {}),
       modelCalls: this.modelCalls,
+      ...(this.sawUsage ? { tokens: { ...this.tokens } } : {}),
     };
   }
 
@@ -198,6 +222,35 @@ export class EvidenceRecorder {
       "utf8",
     );
     this.humanActionsPath = join(this.directory, "human-actions.json");
+  }
+
+  /**
+   * Token accounting, written as its own file at the end of a run.
+   *
+   * Discovery returns an artifact rather than a `RunResult`, so it never writes `result.json`
+   * — and without this the only runs carrying a usage record would be the replays, which by
+   * construction cost nothing. Written only when the model was actually called, so the file's
+   * absence means "no model calls", never "not measured".
+   *
+   * Not passed through the redactor: it is four integers and a timestamp, and routing numbers
+   * through a string redactor to look consistent would be theatre.
+   */
+  async writeUsage(): Promise<void> {
+    if (this.modelCalls === 0) return;
+    await this.ready;
+    await writeFile(
+      join(this.directory, "usage.json"),
+      `${JSON.stringify(
+        {
+          modelCalls: this.modelCalls,
+          tokens: { ...this.tokens },
+          finishedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
   }
 
   /** Run-level metadata, written once at the start so a crashed run still leaves a trail. */

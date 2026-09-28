@@ -246,6 +246,48 @@ evidence directory, so it is a local development and demo surface and must not b
 Evidence files are served only from under `evidence/` and only as `.png` / `.json` / `.jsonl`;
 a path resolving outside that root is refused.
 
+## The audit trail
+
+Every run already writes a directory under `evidence/`. `audit` is the ledger over all of them
+— what ran, how it ended, how many model calls it took and what those cost.
+
+```bash
+npm run cli -- audit          # the table
+npm run cli -- audit --json   # the same rows, for a spreadsheet or a dashboard
+```
+
+Shape of the output (the committed example runs pre-date token accounting, so their own rows
+read `—`):
+
+```
+RUN                               WHAT                      OUTCOME                    CALLS        IN     OUT       COST
+discover-20260928T101318-a4k2p    lookup_balance_discovered recorded                      10    41,207   1,884    $0.2531
+replay-20260928T101655-9mz3c      lookup_balance_discovered success                        0         —       —          —
+replay-20260928T101702-r7wq1      lookup_account_balance    business_outcome:account…      0         —       —          —
+
+  3 run(s), 10 model call(s)
+  tokens : 41,207 in, 1,884 out
+  cost   : $0.2531
+```
+
+**Every replay line costs nothing, and that is the point.** Discovery is the only line item on
+the bill: the flow is worked out once by a model, and every invocation afterwards runs the
+recorded artifact with `modelCalls: 0`. The determinism claim in REPORT §3 shows up here as a
+column of zeros rather than a paragraph.
+
+Three decisions behind the numbers:
+
+**Runs store tokens; the audit computes dollars.** What a run consumed is a fact about that
+run. What it cost is a function of a price list that changes independently, so the rate card
+lives in `src/config.ts` and is applied at read time — a repricing never rewrites history.
+
+**Unknown is not zero.** A replay's `0` is asserted by its result contract. A discovery run
+recorded before this existed left no usage record at all, and shows `—`, with the count of such
+runs in the footer. Folding those into the total would report money that was spent as free.
+
+**An unpriced model is reported, not estimated.** A run whose model has no entry in the rate
+table is counted in its own footer line rather than being quietly given a plausible number.
+
 ## Demo — capabilities as agent-callable tools
 
 ```bash
@@ -467,6 +509,7 @@ src/schema.ts    every typed contract: conditions, locators, actions, the capabi
 src/discovery.ts the LLM loop that produces an artifact — used once per capability
 src/replay.ts    the deterministic interpreter: steps, handlers, checkpoints, outputs
 src/catalog.ts   artifacts as agent-callable tools
+src/audit.ts     the ledger over evidence/: outcomes, model calls, tokens, cost
 src/template.ts  {{inputs|secrets|vars|baseUrl}} resolution and output coercion
 src/cli.ts       discover | replay | validate | capabilities | invoke
 src/safety.ts    the policy guard: origins, routes, action types, risk, budgets

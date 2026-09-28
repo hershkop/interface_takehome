@@ -12,6 +12,7 @@ import { loginToParabank } from "./parabank.js";
 import { CliInterventionChannel } from "./handoff.js";
 import { discover } from "./discovery.js";
 import { invoke, loadCatalog, toToolDefinition } from "./catalog.js";
+import { auditRuns, formatCost } from "./audit.js";
 import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
@@ -89,6 +90,7 @@ Usage:
   npm run cli -- replay <artifact.json> --input name=value [options]
   npm run cli -- validate <artifact.json>
   npm run cli -- capabilities [--json]
+  npm run cli -- audit [--json]
   npm run cli -- invoke <capabilityId> --input name=value [options]
 
 Options:
@@ -102,6 +104,11 @@ Options:
   --trace         Write a raw Playwright trace. UNREDACTED — see README.
   --json          Print the RunResult as JSON and nothing else.
   --allow-draft   invoke only: run a capability still marked draft.
+
+audit:
+  Every run under evidence/, how it ended, and what it cost. Cost is computed from the
+  rates in src/config.ts against the tokens each run recorded — runs store tokens, not
+  dollars, so a repricing never rewrites history. Replay rows cost nothing by construction.
 
 discover options:
   --goal TEXT       What to accomplish. Required.
@@ -121,6 +128,11 @@ async function main(): Promise<void> {
 
   if (args.command === "capabilities") {
     await printCatalog(args.json);
+    return;
+  }
+
+  if (args.command === "audit") {
+    await printAudit(args.json);
     return;
   }
 
@@ -242,6 +254,77 @@ async function main(): Promise<void> {
  */
 
 const CAPABILITIES_DIR = "capabilities";
+
+/**
+ * The audit table.
+ *
+ * Ordered oldest-first and printed in full rather than paged or filtered: the value of an audit
+ * is that it is the whole ledger, and a tool that decides for you which runs are interesting is
+ * a tool you have to audit in turn.
+ */
+async function printAudit(asJson: boolean): Promise<void> {
+  const report = await auditRuns();
+
+  if (asJson) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return;
+  }
+
+  if (report.rows.length === 0) {
+    process.stdout.write("\nNo runs under evidence/.\n");
+    return;
+  }
+
+  // Truncation reserves the column separator: a value that fills its column exactly would
+  // otherwise run into the next one and the table stops being readable at a glance.
+  const pad = (text: string, width: number): string =>
+    (text.length > width - 1 ? `${text.slice(0, width - 2)}…` : text).padEnd(width);
+  const num = (value: number | undefined, width: number): string =>
+    (value === undefined ? "—" : value.toLocaleString("en-US")).padStart(width);
+
+  process.stdout.write(
+    `\n${pad("RUN", 34)}${pad("WHAT", 26)}${pad("OUTCOME", 26)}${"CALLS".padStart(6)}${"IN".padStart(10)}${"OUT".padStart(8)}${"COST".padStart(11)}\n`,
+  );
+  for (const row of report.rows) {
+    process.stdout.write(
+      pad(row.dir, 34) +
+        pad(row.capabilityId ?? row.phase, 26) +
+        pad(row.outcome, 26) +
+        num(row.modelCalls, 6) +
+        num(row.tokens?.input, 10) +
+        num(row.tokens?.output, 8) +
+        formatCost(row.costUsd).padStart(11) +
+        "\n",
+    );
+  }
+
+  const { totals } = report;
+  process.stdout.write(
+    `\n  ${totals.runs} run(s), ${totals.modelCalls} model call(s)\n` +
+      `  tokens : ${totals.tokens.input.toLocaleString("en-US")} in, ${totals.tokens.output.toLocaleString("en-US")} out` +
+      (totals.tokens.cacheRead + totals.tokens.cacheWrite > 0
+        ? `, ${totals.tokens.cacheRead.toLocaleString("en-US")} cache read, ${totals.tokens.cacheWrite.toLocaleString("en-US")} cache write`
+        : "") +
+      `\n  cost   : ${formatCost(totals.costUsd)}\n`,
+  );
+
+  // Two ways the total can understate the truth. Both are stated rather than left to be
+  // inferred from a number that looks authoritative.
+  if (totals.unaccounted > 0) {
+    process.stdout.write(
+      `  note   : ${totals.unaccounted} run(s) left no usage record — recorded before token accounting existed.\n` +
+        `           Their model calls and cost are unknown, and are not in the figures above.\n`,
+    );
+  }
+  if (totals.unpriced > 0) {
+    process.stdout.write(
+      `  note   : ${totals.unpriced} run(s) used a model with no rate in src/config.ts and are unpriced\n`,
+    );
+  }
+  for (const bad of report.skipped) {
+    process.stderr.write(`  UNREADABLE  ${bad.dir}: ${bad.reason}\n`);
+  }
+}
 
 async function printCatalog(asJson: boolean): Promise<void> {
   const { entries, invalid } = await loadCatalog(CAPABILITIES_DIR);
