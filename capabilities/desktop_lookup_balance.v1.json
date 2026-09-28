@@ -1,0 +1,183 @@
+{
+  "schemaVersion": "1.0",
+  "capabilityId": "desktop_lookup_balance",
+  "version": "1.0.0",
+  "metadata": {
+    "name": "Look up a balance on the desktop app",
+    "description": "Sign in to the desktop bank and read an account's balance and type.",
+    "status": "approved",
+    "risk": "safe",
+    "recordedAt": "2026-09-28T10:00:00.000Z",
+    "recordedBy": "human"
+  },
+  "target": {
+    "surface": "desktop",
+    "app": "DesktopBank",
+    "baseUrl": "app://com.example.DesktopBank"
+  },
+  "inputs": {
+    "accountId": {
+      "type": "string",
+      "required": true,
+      "description": "The account number to read."
+    }
+  },
+  "outputs": {
+    "accountType": {
+      "type": "string",
+      "source": {
+        "kind": "variable",
+        "name": "shownType"
+      }
+    },
+    "balance": {
+      "type": "number",
+      "coerce": "currency",
+      "source": {
+        "kind": "variable",
+        "name": "shownBalance"
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "open_app",
+      "action": {
+        "action": "navigate",
+        "url": "{{baseUrl}}"
+      }
+    },
+    {
+      "id": "sign_in_user",
+      "action": {
+        "action": "fill",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "textbox",
+              "name": "Username"
+            }
+          ]
+        },
+        "value": "operator"
+      }
+    },
+    {
+      "id": "sign_in_password",
+      "action": {
+        "action": "fill",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "securetextfield",
+              "name": "Password"
+            }
+          ]
+        },
+        "value": "{{secrets.appPassword}}"
+      }
+    },
+    {
+      "id": "submit",
+      "action": {
+        "action": "click",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "button",
+              "name": "Log In"
+            }
+          ]
+        }
+      },
+      "postcondition": {
+        "kind": "text",
+        "value": "Accounts Overview"
+      }
+    },
+    {
+      "id": "enter_account",
+      "action": {
+        "action": "fill",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "textbox",
+              "name": "Account Number"
+            }
+          ]
+        },
+        "value": "{{inputs.accountId}}"
+      }
+    },
+    {
+      "id": "find_account",
+      "action": {
+        "action": "click",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "button",
+              "name": "Find"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read_type",
+      "action": {
+        "action": "extract",
+        "as": "shownType",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "textbox",
+              "name": "Account Type"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read_balance",
+      "action": {
+        "action": "extract",
+        "as": "shownBalance",
+        "target": {
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "textbox",
+              "name": "Balance"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "handlers": [
+    {
+      "id": "not_found",
+      "match": {
+        "kind": "text",
+        "value": "could not be found"
+      },
+      "scope": "global",
+      "disposition": {
+        "kind": "business_outcome",
+        "outcome": "account_not_found"
+      }
+    }
+  ],
+  "checkpoint": {
+    "kind": "text",
+    "value": "Account Details"
+  }
+}

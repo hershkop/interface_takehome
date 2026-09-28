@@ -177,7 +177,16 @@ async function startReplay(
   // Refused before a run record exists: a capability this build cannot drive should not leave
   // a failed run in the ledger, because nothing about the attempt was informative.
   const unsupported = unsupportedSurfaceReason(entry.artifact);
-  if (unsupported) return send(res, 422, { error: unsupported });
+  if (unsupported) {
+    // The console launches browsers and nothing else. Running a desktop capability needs a
+    // platform helper, which is a per-machine thing to configure — so it points at the CLI
+    // flag that takes one rather than failing with a dead end.
+    return send(res, 422, {
+      error:
+        `${unsupported}. Replay it from the CLI with --desktop-helper "<command>" ` +
+        `(see src/desktop/protocol.ts, or scripts/desktop-helper-stub.mjs for a reference one)`,
+    });
+  }
 
   const run = registry.create("replay", `${entry.capabilityId} v${entry.version}`);
   send(res, 202, { runId: run.id });

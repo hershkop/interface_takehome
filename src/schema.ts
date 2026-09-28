@@ -529,7 +529,22 @@ export const HttpOrigin = z.string().transform((value, ctx) => {
 });
 
 export const Policy = z.object({
-  allowedOrigins: z.array(HttpOrigin).min(1),
+  /**
+   * http(s) origins a web run may reach. Required for a web run; may be empty for a policy
+   * that only governs desktop capabilities.
+   */
+  allowedOrigins: z.array(HttpOrigin).default([]),
+  /**
+   * Applications a desktop run may be in, by the identity its platform uses — a macOS bundle
+   * id, a Windows process name.
+   *
+   * This is the desktop half of the origin allowlist, and it exists because the web half
+   * cannot do the job: `checkLanding` skips the origin check entirely when a surface reports
+   * opaque locations, so before this field a desktop surface ran with no location policing at
+   * all. Matched against the application in an `app://` location, never against the window
+   * title — a title is content the application controls, and containment must not depend on it.
+   */
+  allowedApplications: z.array(z.string().min(1)).default([]),
   /** Globs matched against pathname. Empty = any path under an allowed origin. */
   allowedPaths: z.array(z.string()).default([]),
   allowedActions: z.array(ActionType).default([...ActionType.options]),
@@ -593,7 +608,23 @@ export const Policy = z.object({
         }
       }
     }),
-});
+  })
+  /**
+   * A policy that allows nothing anywhere is a configuration mistake, not a lockdown, and it
+   * fails far from its cause — every navigation refused, with a reason that reads like a bug.
+   * Refusing it at load says so once, here.
+   */
+  .superRefine((policy, ctx) => {
+    if (policy.allowedOrigins.length === 0 && policy.allowedApplications.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "a policy must allow something: allowedOrigins for web capabilities, " +
+          "allowedApplications for desktop ones, or both",
+        path: ["allowedOrigins"],
+      });
+    }
+  });
 export type Policy = z.infer<typeof Policy>;
 
 // ─── Observation (discovery input) ─────────────────────────────────────────────

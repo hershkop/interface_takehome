@@ -257,10 +257,10 @@ export function unsupportedSurfaceReason(
 ): string | undefined {
   const wanted = artifact.target.surface;
   if (wanted === available) return undefined;
-  return (
-    `this capability targets the ${wanted} surface, and no ${wanted} surface is implemented. ` +
-    `Only ${available} capabilities can run here.`
-  );
+  // States what this run supplies rather than what exists anywhere. A desktop surface is
+  // implemented; whether *this* caller has one is a different question, and conflating them
+  // produces an error that is wrong the moment an adapter lands.
+  return `this capability targets the ${wanted} surface, but this run supplies a ${available} one`;
 }
 
 export class PlaywrightSurface implements Surface {

@@ -474,9 +474,18 @@ carries the escalation context, the screenshot and the decision. What is cut is 
 live session to the operator — they act in the real application's browser window instead. The
 scope note permits mocking that, and the control-transfer model is unchanged by it.
 
-**Desktop surface.** Designed for (§4) and not implemented, though the port is now proven
-neutral by a non-browser surface in the test suite. An `opaque` surface also needs its own
-containment story: the origin allowlist cannot police one, and nothing replaces it yet.
+**A platform accessibility helper.** The desktop surface itself is now implemented — the
+fourteen-member port, its wire protocol, the observation renderer, and containment for opaque
+locations, all exercised over a real child process (`src/desktop/`, `test/desktop.test.ts`).
+What is cut is the one process below it: the platform binary that answers seven requests from
+macOS `AXUIElement`, Windows UI Automation or AT-SPI2. A reference helper answers them from a
+hand-written tree instead, so the protocol is executable and the remaining work is specified
+rather than sketched. Writing it needs a machine, a platform language, and an accessibility
+permission grant a user has to give by hand — none of which this repository can stand in for.
+
+The containment gap named here previously is closed: policy carries `allowedApplications`, and
+the landing check dispatches on the kind of location a surface reports instead of skipping
+anything opaque.
 
 **Multi-tenant machinery.** Schema fields for identity, lineage and drift are present; the
 override resolver, registry and credential store are not — that is the scaling infrastructure

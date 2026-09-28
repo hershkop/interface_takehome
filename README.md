@@ -546,8 +546,9 @@ docs/DAY0-FINDINGS.md   what probing ParaBank actually turned up, and what it ch
 
 Nothing above `src/surface.ts` mentions Playwright, CSS, or a browser. Artifacts and replay
 speak in intent — *click the control whose accessible name is "Transfer"*, *is this text
-visible* — and `Surface` has seven methods. A desktop adapter would implement the same seven
-against OS accessibility APIs, and no artifact would change.
+visible* — and `Surface` is fourteen members: seven actions, plus observation, conditions,
+location, evidence and teardown. `src/desktop/` implements all fourteen against a platform
+accessibility API, and no artifact step changed to allow it.
 
 That is also why observation is a Playwright **ARIA snapshot** rather than a DOM dump: role and
 accessible name is the one representation a modern web app, a legacy frameset, and a native
@@ -567,10 +568,73 @@ It is not decorative. `replay()` compares it against the `surfaceKind` its calle
 launches, naming the surface. Handing a desktop artifact to a browser otherwise fails as
 `TARGET_NOT_FOUND` on step one — a true error about entirely the wrong problem.
 
-**`desktop` is declarable and not runnable here.** No desktop surface is implemented; what
-exists is the port one would satisfy, and `test/surface-port.test.ts` replays a capability
-through a non-browser surface to show the seam holds — including, now, a desktop-declared
-artifact refused on the browser path and accepted when a caller supplies a desktop surface.
+## Desktop capabilities
+
+`src/desktop/` is the second implementation of the `Surface` port, and the argument that the
+port was real.
+
+```
+src/desktop/protocol.ts   the contract with a platform helper: seven requests, over stdio
+src/desktop/transport.ts  a child process speaking newline-delimited JSON
+src/desktop/snapshot.ts   an accessibility tree, rendered as a browser observation is
+src/desktop/surface.ts    the fourteen-member port, over that helper
+scripts/desktop-helper-stub.mjs   a reference helper over a pretend application
+```
+
+**What is done.** Everything on this side of the process boundary. A capability signs in, looks
+up an account and returns typed outputs; a missing account returns `account_not_found` from a
+handler rather than a failure; an application outside the allowlist is refused; and no password
+appears in any byte of the evidence. `test/desktop.test.ts` drives all of it through a real
+child process with real stdio framing.
+
+**What is not.** The platform half — the process that answers those seven requests from macOS
+`AXUIElement`, Windows UI Automation or AT-SPI2. `scripts/desktop-helper-stub.mjs` answers them
+from a hand-written tree instead, which makes the protocol executable rather than documentary
+and is the specification a real helper is written against. Match those seven responses against
+a live accessibility API and nothing in TypeScript changes.
+
+```bash
+# The desktop path, end to end, against the reference helper
+DESKTOP_APP_PASSWORD=hunter2 npm run cli -- replay \
+  capabilities/desktop_lookup_balance.v1.json --input accountId=12678 \
+  --policy policies/desktop.json --desktop-helper "node scripts/desktop-helper-stub.mjs"
+#   SUCCESS  accountType = "SAVINGS"  balance = -100   model calls: 0
+
+# A missing account is an answer, not a failure — the same handler contract as on the web
+#   --input accountId=99999  →  BUSINESS OUTCOME  account_not_found
+
+# And the policy governs it, by application
+#   --policy policies/parabank.json
+#   →  application com.example.DesktopBank is not in the allowlist (none configured)
+#      at step 0: open_app
+```
+
+The operator console refuses a desktop capability and says where to run it: it launches
+browsers and nothing else, and a platform helper is a per-machine thing to configure.
+
+Four decisions worth knowing:
+
+**Containment was the blocking problem, not porting.** `checkLanding` used to return early for
+any surface reporting opaque locations — so a desktop surface would have run with *no location
+policing at all*, the guard silently doing nothing rather than saying it could not help. Policy
+now carries `allowedApplications` beside `allowedOrigins`, and the check dispatches on the kind
+of location a surface reports. Matched on the application only: a window title is content the
+application controls, and containment that can be renamed past is not containment.
+
+**The observation format is a contract.** `renderAxSnapshot` matches Playwright's
+`ariaSnapshot` byte for byte, because discovery's prompt teaches a model to read that shape and
+the locators it proposes back are shaped by what it read. Emit a different format and recording
+quality drops with no error anywhere — which is also the clearest vindication of choosing an
+ARIA tree over a DOM dump: a browser and an OS accessibility API are two producers of the same
+thing, so this is a renderer, not a translation layer.
+
+**Resolution stays on this side.** The helper returns every match and `DesktopSurface` enforces
+the same exactly-one-visible-match rule the browser path does. A helper that returned "the
+first of three" would turn replay's refusal to guess into a wrong click.
+
+**Two locator strategies cannot cross.** `css` and `testId` mean nothing to an accessibility
+tree, and are refused *by name* rather than skipped — a web artifact replayed on desktop should
+say which of its locators cannot survive the move, not fail with "not found".
 
 ### Three schema decisions worth knowing up front
 

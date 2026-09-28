@@ -129,7 +129,10 @@ class FakeDesktopSurface implements Surface {
   readonly locationKind = "opaque" as const;
 
   currentUrl(): string {
-    return `app://${this.screen}`;
+    // Application first, window second. The application is what an allowlist matches on, and
+    // it does not change as you move between screens — the earlier `app://<screen>` form made
+    // every screen look like a different application.
+    return `app://fake.app/${this.screen}`;
   }
 
   takeBlockedNavigations(): string[] {
@@ -161,7 +164,10 @@ const artifact = {
     recordedAt: "2026-09-25T00:00:00.000Z",
     recordedBy: "human",
   },
-  target: { app: "legacy-desktop", baseUrl: "http://app.test" },
+  // Declares the surface it needs, and addresses it the way that surface is addressed. The
+  // "unchanged" claim below is about the steps — actions and locator candidates — not the
+  // target address, which is exactly the thing that legitimately differs between surfaces.
+  target: { app: "legacy-desktop", surface: "desktop", baseUrl: "app://fake.app" },
   inputs: { accountId: { type: "string" } },
   outputs: {
     accountType: { type: "string", source: { kind: "variable", name: "kind" }, coerce: "trim" },
@@ -206,11 +212,15 @@ const artifact = {
 };
 
 describe("a capability declares the surface it needs", () => {
-  const desktopArtifact = { ...artifact, target: { ...artifact.target, surface: "desktop" } };
+  // The fixture above already declares `desktop`; this is the same capability with the field
+  // left out, as every artifact written before the field existed has it.
+  const { surface: _declared, ...silentTarget } = artifact.target;
+  const silentArtifact = { ...artifact, target: { ...silentTarget, baseUrl: "http://app.test" } };
+  const desktopArtifact = artifact;
 
   it("defaults an artifact that says nothing to web", () => {
     // Every artifact written before the field existed still means what it meant.
-    const parsed = CapabilityArtifact.parse(artifact);
+    const parsed = CapabilityArtifact.parse(silentArtifact);
     expect(parsed.target.surface).toBe("web");
   });
 
@@ -223,7 +233,7 @@ describe("a capability declares the surface it needs", () => {
         artifact: desktopArtifact,
         inputs: { accountId: "12345" },
         secrets: { user: "operator" },
-        policy: Policy.parse({ allowedOrigins: ["http://app.test"] }),
+        policy: Policy.parse({ allowedOrigins: ["http://app.test"], allowedApplications: ["fake.app"] }),
         evidenceRoot,
         // Declares web, the default: this is the browser path every real caller takes.
         createSurface: async () => {
@@ -255,7 +265,7 @@ describe("a capability declares the surface it needs", () => {
         artifact: desktopArtifact,
         inputs: { accountId: "12345" },
         secrets: { user: "operator" },
-        policy: Policy.parse({ allowedOrigins: ["http://app.test"] }),
+        policy: Policy.parse({ allowedOrigins: ["http://app.test"], allowedApplications: ["fake.app"] }),
         evidenceRoot,
         createSurface: async () => new FakeDesktopSurface(),
         surfaceKind: "desktop",
@@ -278,9 +288,10 @@ describe("the Surface port is technology-neutral", () => {
         artifact,
         inputs: { accountId: "12345" },
         secrets: { user: "operator" },
-        policy: Policy.parse({ allowedOrigins: ["http://app.test"] }),
+        policy: Policy.parse({ allowedOrigins: ["http://app.test"], allowedApplications: ["fake.app"] }),
         evidenceRoot,
         createSurface: async () => fake,
+        surfaceKind: "desktop",
       });
 
       expect(result.status).toBe("success");
@@ -301,9 +312,10 @@ describe("the Surface port is technology-neutral", () => {
         artifact: { ...artifact, inputs: { accountId: { type: "string" } } },
         inputs: { accountId: "99999" }, // no such control on this surface
         secrets: { user: "operator" },
-        policy: Policy.parse({ allowedOrigins: ["http://app.test"] }),
+        policy: Policy.parse({ allowedOrigins: ["http://app.test"], allowedApplications: ["fake.app"] }),
         evidenceRoot,
         createSurface: async () => new FakeDesktopSurface(),
+        surfaceKind: "desktop",
       });
 
       expect(result.status).toBe("failure");
@@ -318,7 +330,7 @@ describe("the Surface port is technology-neutral", () => {
 });
 
 describe("setup and teardown stay inside the result contract (PR11 review)", () => {
-  const policy = () => Policy.parse({ allowedOrigins: ["http://app.test"] });
+  const policy = () => Policy.parse({ allowedOrigins: ["http://app.test"], allowedApplications: ["fake.app"] });
 
   it("turns a rejecting surface factory into a structured failure", async () => {
     // A caller consuming --json must never receive an unhandled rejection, and a custom
@@ -334,6 +346,7 @@ describe("setup and teardown stay inside the result contract (PR11 review)", () 
         createSurface: async () => {
           throw new Error("no display available");
         },
+        surfaceKind: "desktop",
       });
       expect(result.status).toBe("failure");
       if (result.status === "failure") {
@@ -363,6 +376,7 @@ describe("setup and teardown stay inside the result contract (PR11 review)", () 
         policy: policy(),
         evidenceRoot,
         createSurface: async () => fake,
+        surfaceKind: "desktop",
       });
 
       expect(result.status).toBe("success");
@@ -395,6 +409,7 @@ describe("setup and teardown stay inside the result contract (PR11 review)", () 
         policy: policy(),
         evidenceRoot,
         createSurface: async () => fake,
+        surfaceKind: "desktop",
       });
 
       expect(result.status).toBe("success");
@@ -421,7 +436,7 @@ describe("discovery honours the same contract (PR11 review #1)", () => {
         goal: "does not matter — nothing opens",
         capabilityId: "never_recorded",
         baseUrl: "http://app.test",
-        policy: Policy.parse({ allowedOrigins: ["http://app.test"] }),
+        policy: Policy.parse({ allowedOrigins: ["http://app.test"], allowedApplications: ["fake.app"] }),
         inputs: {},
         secrets: {},
         evidenceRoot,
@@ -430,6 +445,7 @@ describe("discovery honours the same contract (PR11 review #1)", () => {
         createSurface: async () => {
           throw new Error("no display available");
         },
+        surfaceKind: "desktop",
       });
 
       expect(result.status).toBe("failed");

@@ -29,6 +29,7 @@ import type {
   LocatorCandidate,
   Observation,
   Policy,
+  SurfaceKind,
   Target,
 } from "./schema.js";
 import { Action, CapabilityArtifact as ArtifactSchema } from "./schema.js";
@@ -66,6 +67,16 @@ export interface DiscoveryRequest {
   onEvent?: (event: EvidenceEvent) => void;
   /** How to obtain a surface. Defaults to a browser. The seam a desktop adapter plugs into. */
   createSurface?: SurfaceFactory;
+  /**
+   * What kind of surface `createSurface` returns, recorded onto the artifact this run produces.
+   *
+   * Replay checks an artifact's declared surface against what its caller supplies; discovery
+   * has no artifact yet — it is writing one — so here the value is an input, not a check. Left
+   * unset it is `web`, matching the default browser factory. Getting this wrong produces an
+   * artifact that claims the wrong surface, which replay would then refuse, so it is better
+   * stated by the caller than guessed from a URL.
+   */
+  surfaceKind?: SurfaceKind;
   headed?: boolean;
   evidenceRoot?: string;
   apiKey: string;
@@ -757,7 +768,11 @@ function buildArtifact(
       recordedBy: "llm",
       model: MODEL,
     },
-    target: { app: "parabank", baseUrl: request.baseUrl },
+    target: {
+      app: "parabank",
+      surface: request.surfaceKind ?? "web",
+      baseUrl: request.baseUrl,
+    },
     inputs,
     outputs,
     steps,

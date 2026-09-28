@@ -13,6 +13,8 @@ import { CliInterventionChannel } from "./handoff.js";
 import { discover } from "./discovery.js";
 import { invoke, loadCatalog, toToolDefinition } from "./catalog.js";
 import { auditRuns, formatCost } from "./audit.js";
+import { DesktopSurface } from "./desktop/surface.js";
+import { StdioDesktopTransport } from "./desktop/transport.js";
 import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
@@ -31,6 +33,7 @@ interface ParsedArgs {
   out: string | undefined;
   maxSteps: number | undefined;
   allowDraft: boolean;
+  desktopHelper: string | undefined;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -42,6 +45,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let capability: string | undefined;
   let out: string | undefined;
   let maxSteps: number | undefined;
+  let desktopHelper: string | undefined;
 
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -59,6 +63,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       capability = argv[++i];
     } else if (arg === "--out") {
       out = argv[++i];
+    } else if (arg === "--desktop-helper") {
+      desktopHelper = argv[++i];
     } else if (arg === "--max-steps") {
       maxSteps = Number.parseInt(argv[++i] ?? "", 10) || undefined;
     } else if (!arg.startsWith("-") && artifactPath === undefined) {
@@ -81,6 +87,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     out,
     maxSteps,
     allowDraft: argv.includes("--allow-draft"),
+    desktopHelper,
   };
 }
 
@@ -104,6 +111,11 @@ Options:
   --trace         Write a raw Playwright trace. UNREDACTED — see README.
   --json          Print the RunResult as JSON and nothing else.
   --allow-draft   invoke only: run a capability still marked draft.
+  --desktop-helper CMD
+                  Run against a desktop surface, driven by this helper process. The helper
+                  answers the seven requests in src/desktop/protocol.ts over stdio. No
+                  platform helper ships here; to see the path work, use the reference one:
+                    --desktop-helper "node scripts/desktop-helper-stub.mjs" 
 
 audit:
   Every run under evidence/, how it ended, and what it cost. Cost is computed from the
@@ -117,6 +129,24 @@ discover options:
   --max-steps N     Cap on model turns (default 25).
   Requires ANTHROPIC_API_KEY (put it in .env).
 `;
+
+/**
+ * Secrets available to a run, resolved from the environment at invocation time.
+ *
+ * Never from the artifact: an artifact stores secret *references*, and the value exists only
+ * here, for the length of the call. A secret that is not set is omitted rather than passed as
+ * an empty string — an empty string satisfies the artifact's "required" check and is then
+ * typed into the application as a blank password, which fails somewhere far less obvious.
+ */
+function cliSecrets(): Record<string, string> {
+  return {
+    parabankUsername: config.parabank.username,
+    parabankPassword: config.parabank.password,
+    ...(process.env.DESKTOP_APP_PASSWORD
+      ? { appPassword: process.env.DESKTOP_APP_PASSWORD }
+      : {}),
+  };
+}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -212,15 +242,28 @@ async function main(): Promise<void> {
     );
   }
 
+  // A desktop run swaps the surface and says so. Everything else about this call is identical,
+  // which is the whole claim the port makes.
+  const desktop = args.desktopHelper?.trim();
+  const [helperCommand, ...helperArgs] = desktop ? desktop.split(/\s+/) : [];
+
   const result = await replay({
     artifact: raw,
     policy,
+    ...(helperCommand
+      ? {
+          surfaceKind: "desktop" as const,
+          createSurface: async () =>
+            new DesktopSurface({
+              transport: new StdioDesktopTransport({ command: helperCommand, args: helperArgs }),
+            }),
+        }
+      : {}),
     ...(channel ? { interventionChannel: channel } : {}),
     ...(args.goal ? { goal: args.goal } : {}),
     inputs: args.inputs,
     secrets: {
-      parabankUsername: config.parabank.username,
-      parabankPassword: config.parabank.password,
+      ...cliSecrets(),
     },
     ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
     headed: args.headed,
@@ -400,8 +443,7 @@ async function runInvoke(args: ParsedArgs): Promise<void> {
     allowDraft: args.allowDraft,
     ...(channel ? { interventionChannel: channel } : {}),
     secrets: {
-      parabankUsername: config.parabank.username,
-      parabankPassword: config.parabank.password,
+      ...cliSecrets(),
     },
     ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
     headed: args.headed,
@@ -462,8 +504,7 @@ async function runDiscovery(args: ParsedArgs): Promise<void> {
     policy,
     inputs: args.inputs,
     secrets: {
-      parabankUsername: config.parabank.username,
-      parabankPassword: config.parabank.password,
+      ...cliSecrets(),
     },
     ...(args.maxSteps === undefined ? {} : { maxSteps: args.maxSteps }),
     headed: args.headed,
