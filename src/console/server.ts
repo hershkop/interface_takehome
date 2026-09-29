@@ -17,7 +17,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve as resolvePath, sep } from "node:path";
 import { config, defaultPolicy } from "../config.js";
-import { loadCatalog } from "../catalog.js";
+import { executableFingerprint, loadCatalog } from "../catalog.js";
 import { CapabilityArtifact } from "../schema.js";
 import { createRedactor } from "../redact.js";
 import { isSensitiveSecretKey } from "../template.js";
@@ -315,6 +315,45 @@ async function saveCapability(
     });
   }
 
+  // ── An approved version does not change under you ────────────────────────
+  //
+  // Approval is a statement that this exact behaviour was reviewed. Editing the steps of an
+  // approved capability while leaving its version alone makes that statement false for every
+  // agent already calling it by name, and leaves no signal anywhere that it happened — the
+  // capability an operator approved on Tuesday is not the one running on Wednesday.
+  //
+  // The rule is therefore not "approved artifacts are read-only" but "a change to what an
+  // approved capability DOES must be visible as a new version". The catalog allows exactly one
+  // live revision per capabilityId (two files claiming the name are both rejected), so the
+  // superseded revision lives in git history — which is where this repository already keeps
+  // them. A version bump is what makes the supersession legible.
+  const submitted = parsed.data;
+  const stored = entry.artifact;
+
+  if (stored.metadata.status === "approved") {
+    const changed = executableFingerprint(stored) !== executableFingerprint(submitted);
+
+    if (changed && submitted.version === stored.version) {
+      return send(res, 409, {
+        error:
+          `"${capabilityId}" v${stored.version} is approved, and this edit changes what it does. ` +
+          `Raise the version to supersede it — the approved revision stays in git history. ` +
+          `A reviewer note can be edited without a version change.`,
+      });
+    }
+
+    // Withdrawal would otherwise be the way around the rule above: set it back to draft, edit
+    // freely, approve again, same version, no trace. Un-approving is a real operation, but it
+    // is a version-level decision and not something an edit form should do as a side effect.
+    if (submitted.metadata.status !== "approved") {
+      return send(res, 409, {
+        error:
+          `"${capabilityId}" v${stored.version} is approved and cannot be returned to draft here. ` +
+          `Supersede it with a new version instead.`,
+      });
+    }
+  }
+
   // A reviewer note is free text a human pasted in, which makes it the likeliest place for a
   // credential or an SSN to enter a git-versioned artifact. It is the one field here that has
   // not already been through the redaction boundary, so it goes through it now. The rest of the
@@ -328,7 +367,7 @@ async function saveCapability(
       .map(([, value]) => value),
   });
 
-  const artifact = parsed.data;
+  const artifact = submitted;
   const submittedNote = artifact.metadata.notes;
   if (submittedNote) {
     artifact.metadata.notes = redact(submittedNote);

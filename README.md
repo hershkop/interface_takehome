@@ -228,11 +228,33 @@ The console is where a draft becomes trusted, so the review actions live there:
 - **Notes** are stored on the artifact itself (`metadata.notes`), not in a sidecar — the brief
   asks for artifacts to be *reviewable*, and why someone approved a draft is part of what a
   later reader needs. Versioned by git, never used for control flow.
-- **Approve / return to draft** flips `metadata.status`. Approving is immediately visible to
-  agents: a draft is hidden from `capabilities --json` and refused by `invoke`.
+- **Approve** flips `metadata.status`. Approving is immediately visible to agents: a draft is
+  hidden from `capabilities --json` and refused by `invoke`. It is one-way here — see below.
 - **Edit** the full artifact as JSON, validated against the same Zod schema replay uses. An
   artifact that would not replay cannot be saved, and the schema's own issues come back to the
   editor verbatim.
+
+#### An approved version does not change under you
+
+Approval is a statement that *this exact behaviour* was reviewed. Editing the steps of an
+approved capability while leaving its version alone makes that statement false for every agent
+already calling it by name, and leaves no signal anywhere that it happened — the capability
+approved on Tuesday is not the one running on Wednesday.
+
+So the rule is not "approved artifacts are read-only" but **a change to what an approved
+capability does must be visible as a new version**:
+
+| Edit to an approved capability | |
+|---|---|
+| Steps, handlers, inputs, outputs, target, risk, provenance | Refused unless `version` also changes |
+| `metadata.notes` | Allowed — a note changes what a reader knows, never what a run does |
+| Back to `draft` | Refused; that would be the way around the rule above |
+
+Compared by fingerprint over the artifact's executable content (`executableFingerprint`), so
+reformatting a file is not a change to it and promoting a draft is not a behavioural one. The
+catalog allows exactly one live revision per `capabilityId` — two files claiming the name are
+both rejected — so a superseded revision lives in git history, which is where this repository
+already keeps older revisions. The version bump is what makes the supersession legible.
 - **Delete** takes two clicks and **moves the file to `capabilities/.trash/`** rather than
   unlinking it. A discovered capability can be a real model run that is not committed yet;
   making deletion recoverable costs a rename.
