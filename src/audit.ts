@@ -208,7 +208,7 @@ async function readRun(rootDir: string, dir: string): Promise<AuditRow> {
 }
 
 /**
- * Reads every run under `rootDir`, oldest first.
+ * Reads every run under `rootDir`, most recent first.
  *
  * `examples/` is walked as well — the committed runs are evidence like any other, and excluding
  * them would make the totals disagree with what a reader can see in the repository.
@@ -256,13 +256,18 @@ export async function auditRuns(rootDir = "evidence"): Promise<AuditReport> {
     else seen.add(row.runId);
   }
 
-  // Chronological, not alphabetical. Sorting directory names groups by the `discover` /
-  // `probe` / `replay` prefix and interleaves the day's runs by phase, which reads as a
-  // history that never happened. Runs with no recorded start sort last, by directory, so the
-  // order is at least stable across invocations.
+  // Newest first, and chronological rather than alphabetical. Sorting directory names groups
+  // by the `discover` / `probe` / `replay` prefix and interleaves the day's runs by phase,
+  // which reads as a history that never happened.
+  //
+  // Most recent at the top because a ledger is read to answer "what just happened" far more
+  // often than "how did this start" — the run you are looking for is almost always the one you
+  // just did. Runs with no recorded start still sort last, not first: an undated row is the
+  // least likely to be the one you came for, and putting it at the top would push the answer
+  // off the screen.
   rows.sort((a, b) => {
     if (a.startedAt !== undefined && b.startedAt !== undefined) {
-      return a.startedAt.localeCompare(b.startedAt) || a.dir.localeCompare(b.dir);
+      return b.startedAt.localeCompare(a.startedAt) || a.dir.localeCompare(b.dir);
     }
     if (a.startedAt !== undefined) return -1;
     if (b.startedAt !== undefined) return 1;
