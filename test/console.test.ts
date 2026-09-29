@@ -149,7 +149,14 @@ describe("console server", () => {
     const url = await start();
     const page = await fetch(url);
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain("Capability console");
+    const html = await page.text();
+    expect(html).toContain("Capability console");
+    expect(html).toContain('href="/app.css"');
+
+    const stylesheet = await fetch(`${url}/app.css`);
+    expect(stylesheet.status).toBe(200);
+    expect(stylesheet.headers.get("content-type")).toContain("text/css");
+    expect(await stylesheet.text()).toContain(".brand-mark");
 
     const catalog = await (await fetch(`${url}/api/capabilities`)).json();
     expect(Array.isArray(catalog.capabilities)).toBe(true);
