@@ -32,10 +32,20 @@ import { DesktopSurface } from "../desktop/surface.js";
 import { StdioDesktopTransport } from "../desktop/transport.js";
 import { loadHelpers } from "./helpers.js";
 
-const CAPABILITIES_DIR = "capabilities";
+/**
+ * Where capabilities live, by default.
+ *
+ * Overridable per server so a test can point one at its own copy. Tests used to write into
+ * this directory and restore it afterwards, which worked right up until another suite read a
+ * file mid-rewrite — vitest runs files in parallel, so "restore carefully" was never the fix.
+ * Not sharing is.
+ */
+const DEFAULT_CAPABILITIES_DIR = "capabilities";
 const EVIDENCE_ROOT = resolvePath("evidence");
 
 export interface ConsoleOptions {
+  /** Directory holding capability artifacts. Defaults to `capabilities/`. */
+  capabilitiesDir?: string;
   port?: number;
   host?: string;
 }
@@ -47,9 +57,10 @@ export async function startConsole(
   const port = options.port ?? Number(process.env.CONSOLE_PORT ?? 17080);
   const host = options.host ?? "127.0.0.1";
   const page = await readFile(new URL("./app.html", import.meta.url), "utf8");
+  const capabilitiesDir = options.capabilitiesDir ?? DEFAULT_CAPABILITIES_DIR;
 
   const server = createServer((req, res) => {
-    void route(req, res, registry, page).catch((err: unknown) => {
+    void route(req, res, registry, page, capabilitiesDir).catch((err: unknown) => {
       send(res, 500, { error: err instanceof Error ? err.message : String(err) });
     });
   });
@@ -73,6 +84,7 @@ async function route(
   res: ServerResponse,
   registry: RunRegistry,
   page: string,
+  CAPABILITIES_DIR: string,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -160,11 +172,11 @@ async function route(
   }
 
   if (path === "/api/replay" && req.method === "POST") {
-    return startReplay(res, registry, await body(req));
+    return startReplay(res, registry, await body(req), CAPABILITIES_DIR);
   }
 
   if (path === "/api/discover" && req.method === "POST") {
-    return startDiscovery(res, registry, await body(req));
+    return startDiscovery(res, registry, await body(req), CAPABILITIES_DIR);
   }
 
   if (path.startsWith("/api/intervene/") && req.method === "POST") {
@@ -175,11 +187,20 @@ async function route(
   }
 
   if (path.startsWith("/api/capabilities/") && req.method === "PUT") {
-    return saveCapability(res, decodeURIComponent(path.slice("/api/capabilities/".length)), await body(req));
+    return saveCapability(
+      res,
+      decodeURIComponent(path.slice("/api/capabilities/".length)),
+      await body(req),
+      CAPABILITIES_DIR,
+    );
   }
 
   if (path.startsWith("/api/capabilities/") && req.method === "DELETE") {
-    return deleteCapability(res, decodeURIComponent(path.slice("/api/capabilities/".length)));
+    return deleteCapability(
+      res,
+      decodeURIComponent(path.slice("/api/capabilities/".length)),
+      CAPABILITIES_DIR,
+    );
   }
 
   if (path.startsWith("/evidence/")) {
@@ -200,6 +221,7 @@ async function startReplay(
   res: ServerResponse,
   registry: RunRegistry,
   payload: Record<string, unknown>,
+  CAPABILITIES_DIR: string,
 ): Promise<void> {
   const capabilityId = String(payload.capabilityId ?? "");
   const inputs = (payload.inputs ?? {}) as Record<string, unknown>;
@@ -297,6 +319,7 @@ async function startDiscovery(
   res: ServerResponse,
   registry: RunRegistry,
   payload: Record<string, unknown>,
+  CAPABILITIES_DIR: string,
 ): Promise<void> {
   const goal = String(payload.goal ?? "").trim();
   const capabilityId = String(payload.capabilityId ?? "").trim();
@@ -401,7 +424,7 @@ function buildDecision(decision: string, reason: unknown) {
  * path. The catalog already knows where each artifact lives; looking the entry up means a
  * crafted id matches nothing instead of escaping the directory.
  */
-async function locate(capabilityId: string) {
+async function locate(capabilityId: string, CAPABILITIES_DIR: string) {
   const { entries } = await loadCatalog(CAPABILITIES_DIR);
   return entries.find((e) => e.capabilityId === capabilityId);
 }
@@ -417,8 +440,9 @@ async function saveCapability(
   res: ServerResponse,
   capabilityId: string,
   payload: Record<string, unknown>,
+  CAPABILITIES_DIR: string,
 ): Promise<void> {
-  const entry = await locate(capabilityId);
+  const entry = await locate(capabilityId, CAPABILITIES_DIR);
   if (!entry) return send(res, 404, { error: `no capability "${capabilityId}"` });
 
   const parsed = CapabilityArtifact.safeParse(payload.artifact);
@@ -567,8 +591,12 @@ async function saveCapability(
  * the console offers deletion one click behind a confirmation. Making it recoverable costs a
  * rename; making it irreversible costs someone their run.
  */
-async function deleteCapability(res: ServerResponse, capabilityId: string): Promise<void> {
-  const entry = await locate(capabilityId);
+async function deleteCapability(
+  res: ServerResponse,
+  capabilityId: string,
+  CAPABILITIES_DIR: string,
+): Promise<void> {
+  const entry = await locate(capabilityId, CAPABILITIES_DIR);
   if (!entry) return send(res, 404, { error: `no capability "${capabilityId}"` });
 
   const trash = join(CAPABILITIES_DIR, ".trash");

@@ -1,10 +1,35 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunRegistry, WebInterventionChannel } from "../src/console/runs.js";
 import { startConsole } from "../src/console/server.js";
 import { loadHelpers } from "../src/console/helpers.js";
 import type { InterventionRequest } from "../src/schema.js";
+
+/**
+ * A throwaway copy of the catalog, one per console.
+ *
+ * These tests write capabilities — promoting, superseding, retiring — and used to do it to the
+ * repository's own directory, restoring afterwards. Vitest runs files in parallel, so any
+ * suite reading a real artifact could catch one mid-rewrite: a failure at file level with every
+ * individual test passing, roughly never, and miserable to diagnose. "Restore carefully" was
+ * never the fix; not sharing is.
+ */
+const catalogs: string[] = [];
+
+async function privateCatalog(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "console-catalog-"));
+  for (const name of (await readdir("capabilities")).filter((f) => f.endsWith(".json"))) {
+    await copyFile(join("capabilities", name), join(dir, name));
+  }
+  catalogs.push(dir);
+  return dir;
+}
+
+afterAll(async () => {
+  for (const dir of catalogs) await rm(dir, { recursive: true, force: true });
+});
 
 const request = (over: Partial<InterventionRequest> = {}): InterventionRequest => ({
   interventionId: "i1",
@@ -115,7 +140,7 @@ describe("console server", () => {
 
   const start = async () => {
     // Port 0 lets the OS pick, so the suite never collides with a console someone is running.
-    const started = await startConsole({ port: 0, host: "127.0.0.1" });
+    const started = await startConsole({ port: 0, host: "127.0.0.1", capabilitiesDir: await privateCatalog() });
     stop = started.close;
     return started.url;
   };
@@ -308,7 +333,7 @@ describe("console server", () => {
 describe("capability management", () => {
   let stop: (() => Promise<void>) | undefined;
   const start = async () => {
-    const started = await startConsole({ port: 0, host: "127.0.0.1" });
+    const started = await startConsole({ port: 0, host: "127.0.0.1", capabilitiesDir: await privateCatalog() });
     stop = started.close;
     return started.url;
   };
@@ -339,19 +364,14 @@ describe("capability management", () => {
   });
 
   /**
-   * Saves that are *allowed* actually write to `capabilities/`, so the originals are put back.
-   * A test suite that leaves the repository edited is a test suite people stop running.
+   * Kept as a wrapper, with nothing left to restore.
+   *
+   * Every console here now serves a private copy of the catalog, so an allowed save writes to
+   * a temp directory and the repository is never touched. The name stays because the tests
+   * below read better for saying which of them write.
    */
   async function withRestoredCapabilities(run: () => Promise<void>): Promise<void> {
-    const dir = "capabilities";
-    const names = (await readdir(dir)).filter((f) => f.endsWith(".json"));
-    const before = new Map<string, string>();
-    for (const name of names) before.set(name, await readFile(join(dir, name), "utf8"));
-    try {
-      await run();
-    } finally {
-      for (const [name, body] of before) await writeFile(join(dir, name), body, "utf8");
-    }
+    await run();
   }
 
   const approvedCapability = async (url: string) => {
@@ -559,7 +579,7 @@ describe("capability management", () => {
 describe("saving an artifact is safe (PR10 review #2, #3)", () => {
   let stop: (() => Promise<void>) | undefined;
   const start = async () => {
-    const started = await startConsole({ port: 0, host: "127.0.0.1" });
+    const started = await startConsole({ port: 0, host: "127.0.0.1", capabilitiesDir: await privateCatalog() });
     stop = started.close;
     return started.url;
   };
