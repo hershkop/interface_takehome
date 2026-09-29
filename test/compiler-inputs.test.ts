@@ -300,7 +300,13 @@ describe("what a recording run is allowed to propose", () => {
     const text = await source();
     expect(text).toContain("cell: {");
     expect(text).toContain("button: {");
-    expect(text).toContain('enum: ["left", "right", null]');
+    // The values are named in the description rather than an `enum`: a nullable field cannot
+    // carry one in a strict tool schema, and asserting the enum is what let a schema the API
+    // rejects outright pass a full test run.
+    expect(text).toContain('"left" or "right"');
+    // Anchored to a schema line, not anywhere in the file: the first version of this matched
+    // the comment above `button` that documents the broken form.
+    expect(text).not.toMatch(/^\s*enum: \[[^\]]*null/m);
   });
 
   it("frames the run by surface rather than assuming a browser", async () => {
