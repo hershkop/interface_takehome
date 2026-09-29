@@ -8,7 +8,7 @@
   <div class="brand-mark" aria-hidden="true">C</div>
   <div class="header-copy">
     <h1>Capability console</h1>
-    <span class="sub" id="conn">connecting…</span>
+    <span class="sub" id="conn" data-state="connecting" role="status">connecting…</span>
   </div>
 </header>
 
@@ -803,8 +803,13 @@
   $("auditFilter").addEventListener("input", renderAudit);
 
   const stream = new EventSource("/api/stream");
-  stream.onopen = () => ($("conn").textContent = "live");
-  stream.onerror = () => ($("conn").textContent = "reconnecting…");
+  function setConn(state, label) {
+    const el = $("conn");
+    el.textContent = label;
+    el.dataset.state = state;
+  }
+  stream.onopen = () => setConn("live", "live");
+  stream.onerror = () => setConn("down", "reconnecting…");
   stream.onmessage = (msg) => {
     const e = JSON.parse(msg.data);
     if (e.type === "hello") {
