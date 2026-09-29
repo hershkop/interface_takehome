@@ -366,6 +366,33 @@ export function collectTargets(artifact: ArtifactShape): Array<{ where: string; 
  * The kinds of surface a capability can target. `web` is the only one with an implementation
  * today; see `PLAYWRIGHT_SURFACE_KIND` and the refusal in `src/surface.ts`.
  */
+/**
+ * Where a capability is in its life, from recorded to retired.
+ *
+ * Five states rather than two, because "approved" was carrying two different claims at once:
+ * that a person had read the thing, and that it actually works. Those are answered by
+ * different evidence and can be true separately — a reviewer can bless a capability nobody has
+ * ever replayed, and a capability can replay perfectly while encoding a flow nobody wanted.
+ *
+ *   draft      recorded, unreviewed. What discovery emits.
+ *   validated  the artifact itself holds up: schema, durable locators, a checkpoint.
+ *   rehearsed  it has actually run — repeatedly, on this exact revision.
+ *   approved   a person signed off. Only these are visible to an agent.
+ *   deprecated retired; kept for history, refused for new calls.
+ *
+ * The order is meaningful: `promote` moves one step at a time, and each step names the
+ * evidence it needs. Deprecation is reachable from anywhere, because the reason to retire
+ * something rarely arrives in sequence.
+ */
+export const CapabilityStatus = z.enum([
+  "draft",
+  "validated",
+  "rehearsed",
+  "approved",
+  "deprecated",
+]);
+export type CapabilityStatus = z.infer<typeof CapabilityStatus>;
+
 export const SurfaceKind = z.enum(["web", "desktop"]);
 export type SurfaceKind = z.infer<typeof SurfaceKind>;
 
@@ -385,7 +412,7 @@ export const CapabilityArtifact = z
     metadata: z.object({
       name: z.string().min(1),
       description: z.string().min(1),
-      status: z.enum(["draft", "approved"]).default("draft"),
+      status: CapabilityStatus.default("draft"),
       /**
        * Required, with no default. A recorder bug or a truncated generated artifact must not be
        * able to produce something that executes unattended by omission. Defaulting to
@@ -398,6 +425,21 @@ export const CapabilityArtifact = z
       recordedBy: z.enum(["llm", "human"]),
       /** Present when recordedBy === "llm". Kept for provenance, not for replay. */
       model: z.string().optional(),
+      /**
+       * What went into compiling this capability, beyond the model: the skill and memory
+       * revisions that shaped the prompt.
+       *
+       * Recorded because a capability is the *output* of a compilation, and two runs of the
+       * same goal against the same application can differ purely because the guidance changed.
+       * Without this, a regression in recording quality has no suspect list. Never read by
+       * replay — it describes how the program was built, not what it does.
+       */
+      compiledWith: z
+        .object({
+          skills: z.array(z.object({ id: z.string(), version: z.string() })).default([]),
+          memory: z.array(z.object({ id: z.string(), version: z.string() })).default([]),
+        })
+        .optional(),
       /**
        * A reviewer's free-text note.
        *

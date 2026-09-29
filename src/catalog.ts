@@ -11,7 +11,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { createHash } from "node:crypto";
-import { CapabilityArtifact, type Policy, type RunResult, type SurfaceKind } from "./schema.js";
+import { type CapabilityStatus, CapabilityArtifact, type Policy, type RunResult, type SurfaceKind } from "./schema.js";
 import { replay, type ReplayOptions } from "./replay.js";
 
 export interface CatalogEntry {
@@ -19,7 +19,7 @@ export interface CatalogEntry {
   version: string;
   name: string;
   description: string;
-  status: "draft" | "approved";
+  status: CapabilityStatus;
   risk: "safe" | "approval_required" | "blocked";
   /** Which kind of surface it drives. Only `web` has an implementation today. */
   surface: SurfaceKind;
@@ -101,6 +101,9 @@ export async function loadCatalog(
   }
 
   return {
+    // Exactly `approved`. Not "anything past rehearsed": a deprecated capability is past every
+    // gate there is and must still never be handed to an agent, and a rehearsed one has proven
+    // it works without anyone having decided it should be callable.
     entries: options.agentFacing ? unique.filter((e) => e.status === "approved") : unique,
     invalid,
   };
@@ -141,9 +144,9 @@ export function toToolDefinition(entry: CatalogEntry): {
     entry.risk === "approval_required"
       ? "This capability requires a human to approve a step before it completes."
       : "",
-    entry.status === "draft"
-      ? "DRAFT: this capability has not been approved for unattended use."
-      : "",
+    entry.status === "approved"
+      ? ""
+      : `${entry.status.toUpperCase()}: this capability is not approved for unattended use.`,
   ].filter(Boolean);
 
   return {
@@ -165,7 +168,10 @@ export async function invoke(
   args: Record<string, unknown>,
   options: Omit<ReplayOptions, "artifact" | "inputs"> & {
     policy: Policy;
-    /** Required to run a draft. Absent, a draft is refused rather than warned about. */
+    /**
+     * Required to run anything not yet approved. Absent, it is refused rather than warned
+     * about — a warning in a description is documentation, and an agent reads the schema.
+     */
     allowDraft?: boolean;
   },
 ): Promise<RunResult | { notFound: string[] } | { refused: string }> {
@@ -173,14 +179,25 @@ export async function invoke(
   const entry = entries.find((e) => e.capabilityId === capabilityId);
   if (!entry) return { notFound: entries.map((e) => e.capabilityId) };
 
-  // `draft` has to mean something. A warning in a description is documentation; an agent reads
-  // the schema and calls the tool. A capability that has never been reviewed and has no error
-  // handling should not be invocable unattended just because it loaded successfully.
-  if (entry.status === "draft" && !options.allowDraft) {
+  // Retirement is not overridable. Every other refusal below is a "not yet"; this one is a
+  // decision that was already made, and an escape hatch would make deprecation advisory.
+  if (entry.status === "deprecated") {
     return {
       refused:
-        `"${capabilityId}" is a draft and is not approved for unattended use. ` +
-        `Review it, set metadata.status to "approved", or pass allowDraft to run it anyway.`,
+        `"${capabilityId}" v${entry.version} is deprecated and will not run. ` +
+        `If something still needs this flow, record a new version of it.`,
+    };
+  }
+
+  // Anything short of approved has to mean something. A capability that has never been
+  // reviewed should not be invocable unattended just because it loaded successfully — and
+  // `rehearsed` is the interesting case: it has proven it *works*, which is not the same as
+  // anyone having decided it *should be called*.
+  if (entry.status !== "approved" && !options.allowDraft) {
+    return {
+      refused:
+        `"${capabilityId}" is ${entry.status}, not approved for unattended use. ` +
+        `Promote it (npm run cli -- promote ${capabilityId}), or pass allowDraft to run it anyway.`,
     };
   }
 

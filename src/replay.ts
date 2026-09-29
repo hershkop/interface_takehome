@@ -42,6 +42,7 @@ import {
   type InterventionChannel,
 } from "./handoff.js";
 import { createRedactor, type Redactor } from "./redact.js";
+import { executableFingerprint } from "./catalog.js";
 import {
   PlaywrightSurface,
   closeSurface,
@@ -230,6 +231,14 @@ export async function replay(options: ReplayOptions): Promise<RunResult> {
     policy: options.policy,
     capabilityId: artifact.capabilityId,
     capabilityVersion: artifact.version,
+    /**
+     * The revision that ran, by content rather than by name.
+     *
+     * Rehearsal is counted against this: a version number is a claim someone typed, and
+     * confidence earned by one revision must not transfer to an edited one wearing the same
+     * label. The fingerprint is what makes "this exact thing worked three times" checkable.
+     */
+    capabilityFingerprint: executableFingerprint(artifact),
     artifactStatus: artifact.metadata.status,
     risk: artifact.metadata.risk,
     baseUrl,

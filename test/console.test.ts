@@ -307,10 +307,13 @@ describe("capability management", () => {
       const superseded = structuredClone(approved.artifact);
       superseded.steps[0].id = `${superseded.steps[0].id}_v2`;
       superseded.version = "1.0.1";
+      // And back to draft: a new version is necessary but not sufficient, because the old
+      // revision's approval was a statement about behaviour that no longer exists.
+      superseded.metadata.status = "draft";
 
       // The rule is not "approved is read-only" — it is "a change to what it does must be
-      // visible as a new version". The superseded revision stays in git history, which is
-      // where this repository already keeps older revisions.
+      // visible as a new version, and that version starts again". The superseded revision
+      // stays in git history, which is where this repository already keeps older revisions.
       expect((await put(url, approved.capabilityId, superseded)).status).toBe(200);
     });
   });
@@ -330,6 +333,80 @@ describe("capability management", () => {
     });
   });
 
+  it("will not let a changed approved capability stay approved, even with a new version", async () => {
+    // The version-bump rule closed one door; this is the same hole entered from the other
+    // side. A bumped version with changed steps and status left at `approved` puts new,
+    // unreviewed behaviour straight into the agent-facing catalog carrying the old revision's
+    // approval — which no gate ever saw.
+    const url = await start();
+    const approved = await approvedCapability(url);
+    if (!approved) return;
+
+    const superseded = structuredClone(approved.artifact);
+    superseded.steps[0].id = `${superseded.steps[0].id}_v2`;
+    superseded.version = "1.0.1";
+
+    const res = await put(url, approved.capabilityId, superseded);
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain("starts at draft");
+  });
+
+  it("accepts the superseding revision once it starts again at draft", async () => {
+    await withRestoredCapabilities(async () => {
+      const url = await start();
+      const approved = await approvedCapability(url);
+      if (!approved) return;
+
+      const superseded = structuredClone(approved.artifact);
+      superseded.steps[0].id = `${superseded.steps[0].id}_v2`;
+      superseded.version = "1.0.1";
+      superseded.metadata.status = "draft";
+
+      expect((await put(url, approved.capabilityId, superseded)).status).toBe(200);
+    });
+  });
+
+  it("refuses to change behaviour and promote in the same save", async () => {
+    // The gates read replay history for a fingerprint. Editing the steps while promoting
+    // would have the new revision inherit evidence earned by the one it replaced — the exact
+    // thing counting rehearsals by content was supposed to prevent.
+    const url = await start();
+    const { capabilities } = await (await fetch(`${url}/api/capabilities`)).json();
+    const draft = capabilities.find((c: { status: string }) => c.status === "draft");
+    if (!draft) return;
+
+    const both = structuredClone(draft.artifact);
+    both.steps[0].id = `${both.steps[0].id}_edited`;
+    both.metadata.status = "validated";
+
+    const res = await put(url, draft.capabilityId, both);
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain("Save the change first, then promote");
+  });
+
+  it("refuses to replay a deprecated capability", async () => {
+    await withRestoredCapabilities(async () => {
+      const url = await start();
+      const approved = await approvedCapability(url);
+      if (!approved) return;
+
+      const retired = structuredClone(approved.artifact);
+      retired.metadata.status = "deprecated";
+      expect((await put(url, approved.capabilityId, retired)).status).toBe(200);
+
+      const res = await fetch(`${url}/api/replay`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ capabilityId: approved.capabilityId, inputs: {} }),
+      });
+
+      // `invoke` refuses a deprecated capability without an override. A console that ran it
+      // anyway would make retirement depend on which button you pressed.
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("deprecated");
+    });
+  });
+
   it("refuses to withdraw an approved capability to draft through the editor", async () => {
     // Otherwise this is the way around the rule: withdraw, edit freely, re-approve, same
     // version, no trace anywhere that the behaviour moved.
@@ -342,7 +419,7 @@ describe("capability management", () => {
 
     const res = await put(url, approved.capabilityId, withdrawn);
     expect(res.status).toBe(409);
-    expect((await res.json()).error).toContain("cannot be returned to draft");
+    expect((await res.json()).error).toContain("does not go back to");
   });
 
   it("leaves drafts editable in place, which is what a draft is for", async () => {

@@ -1,0 +1,80 @@
+{
+  "entries": [
+    {
+      "id": "hidden-internal-error",
+      "version": "1.0.0",
+      "fact": "Every healthy ParaBank page ships the string \"An internal error has occurred\" inside a hidden div. A handler matching that text without requiring visibility fires on every successful run.",
+      "scope": {
+        "app": "parabank",
+        "surface": "web"
+      },
+      "provenance": {
+        "source": "docs/DAY0-FINDINGS.md §3",
+        "observedAt": "2026-09-24T03:42:00.000Z"
+      },
+      "confidence": "high",
+      "owner": "platform-team"
+    },
+    {
+      "id": "login-fields-unnamed",
+      "version": "1.0.0",
+      "fact": "The username and password inputs on the login screen carry no accessible name — their labels are sibling paragraphs rather than associated labels. Target them by form name or id, and assert the \"Customer Login\" heading rather than the fields when writing a postcondition.",
+      "scope": {
+        "app": "parabank",
+        "surface": "web"
+      },
+      "provenance": {
+        "source": "capabilities/lookup_account_balance.v1.json step rationale",
+        "observedAt": "2026-09-24T11:56:00.000Z"
+      },
+      "confidence": "high",
+      "owner": "platform-team"
+    },
+    {
+      "id": "account-not-found-wording",
+      "version": "1.0.0",
+      "fact": "A missing account produces the visible text \"could not be found\" on the account detail screen. This is a business outcome, not an error page, and the run should report account_not_found.",
+      "scope": {
+        "app": "parabank",
+        "surface": "web"
+      },
+      "provenance": {
+        "source": "evidence/examples/04-replay-business-outcome",
+        "observedAt": "2026-09-24T15:09:00.000Z"
+      },
+      "confidence": "high",
+      "owner": "platform-team"
+    },
+    {
+      "id": "session-expiry-bounces-to-login",
+      "version": "1.0.0",
+      "fact": "An expired session redirects to login.htm rather than showing an error. Match the URL and recover by re-authenticating; do not treat it as a hard failure.",
+      "scope": {
+        "app": "parabank",
+        "surface": "web"
+      },
+      "provenance": {
+        "source": "capabilities/lookup_account_balance.v1.json handler session_expired",
+        "observedAt": "2026-09-24T11:56:00.000Z"
+      },
+      "confidence": "medium",
+      "owner": "platform-team"
+    },
+    {
+      "id": "seeded-accounts",
+      "version": "1.0.0",
+      "fact": "The local fixture seeds accounts 12345 and 12678 (SAVINGS) for user john, and 99999 is deliberately absent so the not-found path can be exercised. These ids are local only — a different deployment generates its own.",
+      "scope": {
+        "app": "parabank",
+        "surface": "web",
+        "tenant": "local"
+      },
+      "provenance": {
+        "source": "scripts/setup.ts",
+        "observedAt": "2026-09-24T03:42:00.000Z"
+      },
+      "confidence": "high",
+      "owner": "fixtures-team"
+    }
+  ]
+}

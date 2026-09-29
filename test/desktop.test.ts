@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replay } from "../src/replay.js";
@@ -485,9 +485,19 @@ describe("the agent-facing entry point can run what it lists", () => {
     // is worse than one it cannot see at all, and the CLI used to parse --desktop-helper
     // globally while only the direct `replay` path acted on it.
     const evidence = await mkdtemp(join(tmpdir(), "desktop-invoke-"));
+    // A private copy of the catalog, not the repository's own directory. `console.test.ts`
+    // rewrites capabilities/ while testing saves and restores it afterwards, and vitest runs
+    // files in parallel — so reading the live directory here makes two unrelated suites race
+    // over one mutable resource, which fails roughly never and is miserable to diagnose.
+    const catalog = await mkdtemp(join(tmpdir(), "desktop-catalog-"));
+    await writeFile(
+      join(catalog, "desktop_lookup_balance.v1.json"),
+      await readFile("capabilities/desktop_lookup_balance.v1.json", "utf8"),
+      "utf8",
+    );
     try {
       const result = await invoke(
-        "capabilities",
+        catalog,
         "desktop_lookup_balance",
         { accountId: "12678" },
         {
@@ -505,6 +515,7 @@ describe("the agent-facing entry point can run what it lists", () => {
       }
     } finally {
       await rm(evidence, { recursive: true, force: true });
+      await rm(catalog, { recursive: true, force: true });
     }
   }, 30_000);
 });

@@ -421,7 +421,13 @@
           <input data-cap="${esc(id)}" data-input="${esc(n)}" placeholder="${esc(d.description ?? "")}" />
         `).join("")}
         <div class="actions">
-          <button class="primary" data-replay="${esc(id)}">Replay</button>
+          ${
+            // No Replay for a retired capability. The server refuses it, and a button that
+            // always fails teaches an operator to distrust the buttons rather than the state.
+            c.status === "deprecated"
+              ? `<span class="count">deprecated — will not run</span>`
+              : `<button class="primary" data-replay="${esc(id)}">Replay</button>`
+          }
           <button data-edit="${esc(id)}">${open.has(id) ? "Close" : "Edit"}</button>
           <button class="danger" data-delete="${esc(id)}">Delete</button>
         </div>
@@ -453,19 +459,38 @@
         <div class="actions">
           <button data-save-notes="${esc(c.capabilityId)}">Save note</button>
           ${
-            draft
-              ? `<button class="primary" data-toggle-status="${esc(c.capabilityId)}">Approve for unattended use</button>`
+            c.nextStatus
+              ? `<button class="primary" data-promote="${esc(c.capabilityId)}" data-to="${esc(c.nextStatus)}">Promote to ${esc(c.nextStatus)}</button>`
               : ""
+          }
+          ${
+            c.status === "deprecated"
+              ? ""
+              : `<button data-promote="${esc(c.capabilityId)}" data-to="deprecated">Deprecate</button>`
           }
         </div>
         ${
-          // No "return to draft" for an approved capability. The server refuses it — it would
-          // be the way around version-on-change: withdraw, edit freely, re-approve, same
-          // version, no trace — so offering a button that always fails would only mislead.
-          draft
-            ? ""
-            : `<p class="note">Approved at v${esc(c.version)}. A change to what it does needs a
+          // Approval is the one gate a program cannot satisfy, so the name is asked for at the
+          // moment of signing rather than assumed from whoever has the console open.
+          c.nextStatus === "approved"
+            ? `<label>Approving as</label>
+               <input data-approver="${esc(c.capabilityId)}" placeholder="your name" />`
+            : ""
+        }
+        ${
+          // Each state says what it still owes, so a button that cannot fire says why before
+          // you press it.
+          c.gate
+            ? `<p class="note">${c.gate.ok ? "Ready: " : "Not yet: "}${esc(c.gate.reason)}</p>`
+            : ""
+        }
+        ${
+          // No "return to draft" for an approved capability. It would be the way around
+          // version-on-change: withdraw, edit freely, re-approve, same version, no trace.
+          c.status === "approved"
+            ? `<p class="note">Approved at v${esc(c.version)}. A change to what it does needs a
                new version; a reviewer note does not.</p>`
+            : ""
         }
         <label style="margin-top:12px">Full artifact — validated against the schema on save</label>
         <textarea data-json="${esc(c.capabilityId)}">${esc(JSON.stringify(c.artifact, null, 2))}</textarea>
@@ -477,11 +502,11 @@
   }
 
   /** Every write goes through one place, so validation errors are reported the same way. */
-  async function saveArtifact(id, artifact, issuesEl) {
+  async function saveArtifact(id, artifact, issuesEl, approvedBy) {
     const res = await fetch(`/api/capabilities/${encodeURIComponent(id)}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ artifact }),
+      body: JSON.stringify({ artifact, ...(approvedBy ? { approvedBy } : {}) }),
     });
     const payload = await res.json();
     if (res.ok) {
@@ -557,12 +582,16 @@
       return;
     }
 
-    if (d.toggleStatus) {
-      const c = find(d.toggleStatus);
+    if (d.promote) {
+      const c = find(d.promote);
       const artifact = structuredClone(c.artifact);
-      artifact.metadata.status = c.status === "draft" ? "approved" : "draft";
-      await saveArtifact(d.toggleStatus, artifact,
-        document.querySelector(`[data-issues="${CSS.escape(d.toggleStatus)}"]`));
+      artifact.metadata.status = d.to;
+      // The server runs the gate regardless of what this sends; the name is passed because
+      // approval is the one step that needs a person, and it is asked for at signing time.
+      const approver = document.querySelector(`[data-approver="${CSS.escape(d.promote)}"]`);
+      await saveArtifact(d.promote, artifact,
+        document.querySelector(`[data-issues="${CSS.escape(d.promote)}"]`),
+        approver?.value?.trim() || undefined);
       return;
     }
 

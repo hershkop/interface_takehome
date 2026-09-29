@@ -15,6 +15,8 @@ import { priceRun } from "./config.js";
 import { EvidenceSummary, RunResult, TokenUsage } from "./schema.js";
 
 export interface AuditRow {
+  /** The revision that ran, by content. Absent on runs recorded before it was written. */
+  fingerprint: string | undefined;
   /** Path under `evidence/`. The identity on disk, and unique — a copied run reuses its runId. */
   dir: string;
   runId: string;
@@ -177,6 +179,10 @@ async function readRun(rootDir: string, dir: string): Promise<AuditRow> {
 
   return {
     dir,
+    fingerprint:
+      typeof header["capabilityFingerprint"] === "string"
+        ? header["capabilityFingerprint"]
+        : undefined,
     runId: typeof header["runId"] === "string" ? header["runId"] : dir,
     phase,
     startedAt,
@@ -301,4 +307,34 @@ export async function auditRuns(rootDir = "evidence"): Promise<AuditReport> {
 /** `$0.0412`, or `—` for a run with nothing to price. Four places: these runs are cents. */
 export function formatCost(costUsd: number | undefined): string {
   return costUsd === undefined ? "—" : `$${costUsd.toFixed(4)}`;
+}
+
+/**
+ * How many times one revision has replayed, cleanly and otherwise.
+ *
+ * Counted by fingerprint, so an edited capability starts over. That is the point: the whole
+ * value of a rehearsal record is that it belongs to the thing that ran, and a version number is
+ * a claim someone typed. Confidence must not be inheritable.
+ *
+ * `escalated` is neither: the run stopped for a person and never reached a verdict, so counting
+ * it as a success would credit a rehearsal to something that did not finish, and counting it as
+ * a failure would punish a capability for being correctly cautious.
+ */
+export async function rehearsalsFor(
+  fingerprint: string,
+  rootDir = "evidence",
+): Promise<{ successes: number; failures: number }> {
+  const { rows } = await auditRuns(rootDir);
+  let successes = 0;
+  let failures = 0;
+
+  for (const row of rows) {
+    // Copies under examples/ are the same execution as the run they were copied from; counting
+    // both would let committing an example earn a rehearsal.
+    if (row.fingerprint !== fingerprint || row.duplicateOf !== undefined) continue;
+    if (row.outcome === "success" || row.outcome.startsWith("business_outcome")) successes++;
+    else if (row.outcome.startsWith("failure")) failures++;
+  }
+
+  return { successes, failures };
 }

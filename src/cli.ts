@@ -6,13 +6,22 @@
  */
 import { readFile } from "node:fs/promises";
 import { config, defaultPolicy } from "./config.js";
-import { CapabilityArtifact, Policy, type RunResult, type SurfaceKind } from "./schema.js";
+import {
+  CapabilityArtifact,
+  CapabilityStatus,
+  Policy,
+  type RunResult,
+  type SurfaceKind,
+} from "./schema.js";
 import { replay } from "./replay.js";
 import { loginToParabank } from "./parabank.js";
 import { CliInterventionChannel } from "./handoff.js";
 import { discover } from "./discovery.js";
-import { invoke, loadCatalog, toToolDefinition } from "./catalog.js";
-import { auditRuns, formatCost } from "./audit.js";
+import { executableFingerprint, invoke, loadCatalog, toToolDefinition } from "./catalog.js";
+import { auditRuns, formatCost, rehearsalsFor } from "./audit.js";
+import { checkPromotion, nextStatus } from "./lifecycle.js";
+import { loadSkills } from "./skills.js";
+import { loadMemory, sensitiveValues } from "./appmemory.js";
 import { DesktopSurface } from "./desktop/surface.js";
 import type { SurfaceFactory } from "./surface.js";
 import { StdioDesktopTransport } from "./desktop/transport.js";
@@ -35,6 +44,9 @@ interface ParsedArgs {
   maxSteps: number | undefined;
   allowDraft: boolean;
   desktopHelper: string | undefined;
+  by: string | undefined;
+  to: string | undefined;
+  tenant: string | undefined;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -47,6 +59,9 @@ function parseArgs(argv: string[]): ParsedArgs {
   let out: string | undefined;
   let maxSteps: number | undefined;
   let desktopHelper: string | undefined;
+  let by: string | undefined;
+  let to: string | undefined;
+  let tenant: string | undefined;
 
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -64,6 +79,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       capability = argv[++i];
     } else if (arg === "--out") {
       out = argv[++i];
+    } else if (arg === "--tenant") {
+      tenant = argv[++i];
+    } else if (arg === "--by") {
+      by = argv[++i];
+    } else if (arg === "--to") {
+      to = argv[++i];
     } else if (arg === "--desktop-helper") {
       desktopHelper = argv[++i];
     } else if (arg === "--max-steps") {
@@ -89,6 +110,9 @@ function parseArgs(argv: string[]): ParsedArgs {
     maxSteps,
     allowDraft: argv.includes("--allow-draft"),
     desktopHelper,
+    by,
+    to,
+    tenant,
   };
 }
 
@@ -99,6 +123,10 @@ Usage:
   npm run cli -- validate <artifact.json>
   npm run cli -- capabilities [--json]
   npm run cli -- audit [--json]
+  npm run cli -- promote <capabilityId> [--by "name"]
+  npm run cli -- deprecate <capabilityId>
+  npm run cli -- skills
+  npm run cli -- memory [--tenant NAME]
   npm run cli -- invoke <capabilityId> --input name=value [options]
 
 Options:
@@ -111,7 +139,15 @@ Options:
   --goal TEXT     What this invocation is for; shown to the operator on escalation.
   --trace         Write a raw Playwright trace. UNREDACTED — see README.
   --json          Print the RunResult as JSON and nothing else.
-  --allow-draft   invoke only: run a capability still marked draft.
+  --allow-draft   invoke only: run a capability not yet approved.
+  --by NAME       promote only: who is signing off. Required to reach "approved".
+  --to STATUS     promote only: assert the state you expect, refused if it is not the next one.
+
+lifecycle:
+  draft -> validated -> rehearsed -> approved, and deprecated from anywhere.
+  Each step names the evidence it needs: "validated" reads the artifact, "rehearsed" counts
+  clean replays of THIS revision, "approved" needs a person. Only "approved" is visible to an
+  agent. Rehearsals are counted by content fingerprint, so editing a capability resets them.
   --desktop-helper CMD
                   Run against a desktop surface, driven by this helper process. The helper
                   answers the seven requests in src/desktop/protocol.ts over stdio. No
@@ -183,6 +219,21 @@ async function main(): Promise<void> {
 
   if (args.command === "capabilities") {
     await printCatalog(args.json);
+    return;
+  }
+
+  if (args.command === "promote" || args.command === "deprecate") {
+    await runLifecycle(args);
+    return;
+  }
+
+  if (args.command === "skills") {
+    await printSkills();
+    return;
+  }
+
+  if (args.command === "memory") {
+    await printMemory(args);
     return;
   }
 
@@ -319,6 +370,130 @@ const CAPABILITIES_DIR = "capabilities";
  * is that it is the whole ledger, and a tool that decides for you which runs are interesting is
  * a tool you have to audit in turn.
  */
+/**
+ * Moves a capability one step along the lifecycle, or retires it.
+ *
+ * Writes the artifact back with a new status and nothing else changed — which is why this is
+ * safe under the approved-immutability rule: promotion is not a behavioural change, and the
+ * fingerprint that rule compares deliberately excludes `status`.
+ */
+async function runLifecycle(args: ParsedArgs): Promise<void> {
+  const capabilityId = args.artifactPath;
+  if (!capabilityId) {
+    process.stderr.write(`${args.command} needs a capability id\n`);
+    process.exit(1);
+  }
+
+  const { entries } = await loadCatalog(CAPABILITIES_DIR);
+  const entry = entries.find((e) => e.capabilityId === capabilityId);
+  if (!entry) {
+    process.stderr.write(
+      `no capability "${capabilityId}". Available: ${entries.map((e) => e.capabilityId).join(", ")}\n`,
+    );
+    process.exit(1);
+  }
+
+  const to =
+    args.command === "deprecate"
+      ? ("deprecated" as const)
+      : (args.to ?? nextStatus(entry.artifact.metadata.status));
+
+  if (to === undefined) {
+    process.stderr.write(`"${capabilityId}" is ${entry.status}; there is nothing above it\n`);
+    process.exit(1);
+  }
+
+  const target = CapabilityStatus.safeParse(to);
+  if (!target.success) {
+    process.stderr.write(`"${to}" is not a lifecycle state\n`);
+    process.exit(1);
+  }
+
+  // Rehearsals are read from replay history rather than taken on trust, and keyed by the
+  // fingerprint of this exact revision.
+  const rehearsals = await rehearsalsFor(executableFingerprint(entry.artifact));
+  const gate = checkPromotion(entry.artifact, target.data, {
+    rehearsals,
+    ...(args.by ? { approvedBy: args.by } : {}),
+  });
+
+  if (!gate.ok) {
+    process.stderr.write(`REFUSED  ${capabilityId}: ${entry.status} -> ${target.data}\n`);
+    process.stderr.write(`  ${gate.reason}\n`);
+    process.exit(1);
+  }
+
+  const promoted = {
+    ...entry.artifact,
+    metadata: {
+      ...entry.artifact.metadata,
+      status: target.data,
+      // The approval is recorded on the artifact, because an approval nobody is attached to is
+      // an unsigned one — and the note is where a later reader looks for why.
+      ...(target.data === "approved" && args.by
+        ? {
+            notes: [entry.artifact.metadata.notes, `Approved by ${args.by} on ${new Date().toISOString().slice(0, 10)}. ${gate.reason}.`]
+              .filter(Boolean)
+              .join("\n"),
+          }
+        : {}),
+    },
+  };
+
+  await writeFile(entry.path, `${JSON.stringify(promoted, null, 2)}\n`, "utf8");
+  process.stdout.write(`${entry.status} -> ${target.data}  ${capabilityId} v${entry.version}\n`);
+  process.stdout.write(`  ${gate.reason}\n`);
+}
+
+/** The skill library, as discovery sees it. */
+async function printSkills(): Promise<void> {
+  const { skills, invalid } = await loadSkills();
+
+  process.stdout.write(`\n${skills.length} skill(s)\n\n`);
+  for (const skill of skills) {
+    process.stdout.write(`  ${skill.id}  v${skill.version}  [${skill.scope}]\n`);
+    process.stdout.write(`    ${skill.title}\n`);
+  }
+  for (const bad of invalid) process.stderr.write(`  INVALID  ${bad.path}: ${bad.reason}\n`);
+  process.stdout.write(
+    `\nRead only while recording. Replay imports neither skills nor memory — that is what\n` +
+      `keeps an approved capability's behaviour a function of the artifact alone.\n`,
+  );
+}
+
+/** Application memory, filtered the way a recording run would filter it. */
+async function printMemory(args: ParsedArgs): Promise<void> {
+  const { entries, invalid } = await loadMemory("memory", { secrets: sensitiveValues(cliSecrets()) });
+
+  // Filtered exactly as a recording run filters: an entry with no tenant belongs to all of
+  // them, one naming a different tenant is invisible. Showing every tenant's entries under a
+  // --tenant flag would make this command answer a different question than the one the prompt
+  // is built from, which is the question an operator is actually asking.
+  const shown =
+    args.tenant === undefined
+      ? entries
+      : entries.filter((e) => e.scope.tenant === undefined || e.scope.tenant === args.tenant);
+
+  process.stdout.write(
+    `\n${shown.length} live memory entr(ies)` +
+      (args.tenant === undefined
+        ? ` across all tenants\n\n`
+        : ` visible to tenant "${args.tenant}" (of ${entries.length})\n\n`),
+  );
+  for (const entry of shown) {
+    const scope = [
+      entry.scope.app,
+      entry.scope.surface,
+      entry.scope.tenant ?? "all tenants",
+    ].join(" / ");
+    process.stdout.write(`  ${entry.id}  v${entry.version}  [${scope}]  ${entry.confidence}\n`);
+    process.stdout.write(`    ${entry.fact}\n`);
+    process.stdout.write(`    source: ${entry.provenance.source}  ·  owner: ${entry.owner}\n\n`);
+  }
+  for (const bad of invalid) process.stderr.write(`  REFUSED  ${bad.path}: ${bad.reason}\n`);
+  if (args.json) process.stdout.write(`${JSON.stringify(shown, null, 2)}\n`);
+}
+
 async function printAudit(asJson: boolean): Promise<void> {
   const report = await auditRuns();
 

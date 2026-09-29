@@ -25,7 +25,8 @@ import { replay } from "../replay.js";
 import { discover } from "../discovery.js";
 import { loginToParabank } from "../parabank.js";
 import { RunRegistry, WebInterventionChannel } from "./runs.js";
-import { auditRuns } from "../audit.js";
+import { auditRuns, rehearsalsFor } from "../audit.js";
+import { checkPromotion, nextStatus } from "../lifecycle.js";
 import { unsupportedSurfaceReason } from "../surface.js";
 
 const CAPABILITIES_DIR = "capabilities";
@@ -81,6 +82,18 @@ async function route(
 
   if (path === "/api/capabilities") {
     const { entries, invalid } = await loadCatalog(CAPABILITIES_DIR);
+
+    // Evaluated here rather than in the browser: the gates read replay history off disk, and a
+    // UI that guessed at them would eventually disagree with the server that enforces them.
+    const gates = new Map<string, { ok: boolean; reason: string }>();
+    for (const e of entries) {
+      const to = nextStatus(e.status);
+      if (to === undefined) continue;
+      const rehearsals = await rehearsalsFor(executableFingerprint(e.artifact));
+      // `approvedBy` is supplied at the moment of approval, so the gate shown here reports
+      // what is still outstanding rather than pretending a signature already exists.
+      gates.set(e.capabilityId, checkPromotion(e.artifact, to, { rehearsals }));
+    }
     return send(res, 200, {
       capabilities: entries.map((e) => ({
         capabilityId: e.capabilityId,
@@ -90,6 +103,8 @@ async function route(
         status: e.status,
         risk: e.risk,
         surface: e.surface,
+        nextStatus: e.status === "deprecated" ? undefined : nextStatus(e.status),
+        gate: gates.get(e.capabilityId),
         path: e.path,
         inputs: e.artifact.inputs,
         outputs: e.artifact.outputs,
@@ -173,6 +188,18 @@ async function startReplay(
   const { entries } = await loadCatalog(CAPABILITIES_DIR);
   const entry = entries.find((e) => e.capabilityId === capabilityId);
   if (!entry) return send(res, 404, { error: `no capability "${capabilityId}"` });
+
+  // Retirement means retired, whoever is asking. `invoke` refuses a deprecated capability
+  // without an override, and a console that ran it anyway would make that guarantee depend on
+  // which button you happened to press. The diagnostic escape hatch is the CLI replaying an
+  // artifact file directly, which does not go through the catalog at all.
+  if (entry.status === "deprecated") {
+    return send(res, 409, {
+      error:
+        `"${capabilityId}" v${entry.version} is deprecated and will not run. ` +
+        `If something still needs this flow, record a new version of it.`,
+    });
+  }
 
   // Refused before a run record exists: a capability this build cannot drive should not leave
   // a failed run in the ledger, because nothing about the attempt was informative.
@@ -330,10 +357,26 @@ async function saveCapability(
   const submitted = parsed.data;
   const stored = entry.artifact;
 
-  if (stored.metadata.status === "approved") {
-    const changed = executableFingerprint(stored) !== executableFingerprint(submitted);
+  // ── Status changes go through the same gates as `promote` ────────────────
+  //
+  // `status` is deliberately outside the immutability fingerprint, because promoting is not a
+  // behavioural change. That leaves this editor as a way to write any status onto any artifact
+  // — draft straight to approved, skipping every gate — unless the transition is checked here
+  // too. A ladder with a side door is not a ladder.
+  const changed = executableFingerprint(stored) !== executableFingerprint(submitted);
 
-    if (changed && submitted.version === stored.version) {
+  // ── A change to behaviour starts the ladder again ────────────────────────
+  //
+  // Every state above `draft` is a claim about a specific revision: that *this* artifact
+  // validates, that *this* fingerprint replayed cleanly three times, that a person read *this*
+  // and signed it. Change what the capability does and all three claims are about something
+  // that no longer exists — so the new revision starts at draft and re-earns them.
+  //
+  // Without this, bumping the version was enough to put new, unreviewed behaviour straight
+  // into the agent-facing catalog while carrying the old revision's approval: exactly the hole
+  // the version-bump rule was added to close, entered from the other side.
+  if (changed) {
+    if (stored.metadata.status === "approved" && submitted.version === stored.version) {
       return send(res, 409, {
         error:
           `"${capabilityId}" v${stored.version} is approved, and this edit changes what it does. ` +
@@ -342,14 +385,49 @@ async function saveCapability(
       });
     }
 
-    // Withdrawal would otherwise be the way around the rule above: set it back to draft, edit
-    // freely, approve again, same version, no trace. Un-approving is a real operation, but it
-    // is a version-level decision and not something an edit form should do as a side effect.
-    if (submitted.metadata.status !== "approved") {
+    if (submitted.metadata.status !== "draft") {
       return send(res, 409, {
         error:
-          `"${capabilityId}" v${stored.version} is approved and cannot be returned to draft here. ` +
-          `Supersede it with a new version instead.`,
+          stored.metadata.status === "draft"
+            ? // Promoting in the same save as an edit: the gates would read evidence for the
+              // revision being replaced, and hand it to the one replacing it.
+              `this save both changes what "${capabilityId}" does and promotes it to ` +
+              `${submitted.metadata.status}. Save the change first, then promote — a gate has ` +
+              `to be answered by the revision it is letting through.`
+            : `this edit changes what "${capabilityId}" does, so the new revision starts at ` +
+              `draft and re-earns validation, rehearsal and approval. Set metadata.status to ` +
+              `"draft" (it was ${stored.metadata.status}) and save again.`,
+      });
+    }
+  }
+
+  // ── Status changes go through the same gates as `promote` ────────────────
+  //
+  // `status` is deliberately outside the immutability fingerprint, because promoting is not a
+  // behavioural change. That leaves this editor as a way to write any status onto any artifact
+  // — draft straight to approved, skipping every gate — unless the transition is checked here
+  // too. A ladder with a side door is not a ladder.
+  //
+  // Applied only when the content is unchanged. A changed one has already been forced back to
+  // draft above, and that reset is not a promotion — it is a new revision beginning, so the
+  // ladder's "no going backwards" rule does not govern it. Running the gate on a reset would
+  // refuse the very supersession the rule above just demanded.
+  //
+  // Which also means the evidence gathered below cannot belong to a different revision than
+  // the one being written. The gate is still handed the SUBMITTED content with the STORED
+  // status: the transition is from where it is, about what is being saved.
+  if (!changed && submitted.metadata.status !== stored.metadata.status) {
+    const rehearsals = await rehearsalsFor(executableFingerprint(submitted));
+    const approvedBy = typeof payload.approvedBy === "string" ? payload.approvedBy : "";
+    const gate = checkPromotion(
+      { ...submitted, metadata: { ...submitted.metadata, status: stored.metadata.status } },
+      submitted.metadata.status,
+      { rehearsals, ...(approvedBy ? { approvedBy } : {}) },
+    );
+
+    if (!gate.ok) {
+      return send(res, 409, {
+        error: `${stored.metadata.status} -> ${submitted.metadata.status} refused: ${gate.reason}`,
       });
     }
   }
