@@ -3,6 +3,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RunRegistry, WebInterventionChannel } from "../src/console/runs.js";
 import { startConsole } from "../src/console/server.js";
+import { loadHelpers } from "../src/console/helpers.js";
 import type { InterventionRequest } from "../src/schema.js";
 
 const request = (over: Partial<InterventionRequest> = {}): InterventionRequest => ({
@@ -194,19 +195,23 @@ describe("console server", () => {
   });
 
   it("declares a start location for every helper it offers", async () => {
+    // Read from the declaration, not by starting a run.
+    //
+    // The first version of this posted to /api/discover for each helper and asserted the
+    // response did not complain about a missing baseUrl — which meant that with an API key
+    // set, every `npm test` launched real recording runs: tokens spent, and an evidence
+    // directory left at the top of the ledger where a demo audience looks first.
+    //
     // A replay reads its entry point from the artifact; a recording is producing one, so a
-    // helper with no baseUrl can be replayed against and not recorded against — which is a
-    // confusing half-capability to ship.
-    const url = await start();
-    const { helpers } = await (await fetch(`${url}/api/helpers`)).json();
+    // helper with no baseUrl can be replayed against and not recorded against. That is a
+    // property of the file, and the file is what this should read.
+    const { helpers, invalid } = await loadHelpers();
+
+    expect(invalid).toBeUndefined();
+    expect(helpers.length).toBeGreaterThan(0);
     for (const helper of helpers) {
-      const res = await fetch(`${url}/api/discover`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ goal: "x", capabilityId: "probe_thing", helper: helper.name }),
-      });
-      // Either it starts, or it stops for a missing API key — never for a missing baseUrl.
-      expect(await res.text()).not.toContain("declares no baseUrl");
+      expect(helper.baseUrl, helper.name).toBeTruthy();
+      expect(helper.policy, helper.name).toBeTruthy();
     }
   });
 
