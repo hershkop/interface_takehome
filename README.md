@@ -1,16 +1,42 @@
 # Computer-Use Automation System
 
-An LLM discovers how to drive a legacy web UI once; the run is recorded as a **typed, versioned
+An LLM discovers how to drive an application once; the run is recorded as a **typed, versioned
 capability artifact**; that artifact then replays **deterministically, with no model in the
 decision loop**, returning typed outputs — or a business outcome, an escalation to a human, or a
 debuggable failure.
 
-Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking demo app, as a
-stand-in for the back-office systems this is really aimed at. Design rationale is in
-[PLAN.md](PLAN.md); the assignment write-up will be in `REPORT.md`.
+The model is a **compiler**, not the runtime. It runs once, while recording. Replay is a
+deterministic machine over the artifact it produced, and every run record carries
+`modelCalls: 0` to say so.
 
-Design rationale and trade-offs: **[REPORT.md](REPORT.md)**. Evidence from real runs:
-**[`/evidence/examples/`](evidence/examples)**.
+Two surfaces, one vocabulary: a **web** application through a browser, and a **desktop**
+application through its platform accessibility API. The same artifact shape, the same replay
+engine, the same policy — only the surface differs.
+
+Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking demo app, as a
+stand-in for the back-office systems this is really aimed at.
+
+Design rationale and trade-offs: **[REPORT.md](REPORT.md)**. Build plan: **[PLAN.md](PLAN.md)**.
+Evidence from real runs: **[`/evidence/examples/`](evidence/examples)**.
+
+---
+
+### The operator console
+
+Capabilities, with their lifecycle state, risk, surface and generated input forms:
+
+![The capabilities tab](docs/images/console-capabilities.jpg)
+
+Every run that has ever happened, what it did, and what it cost. Discovery is the only line
+item — replay is free by construction:
+
+![The audit tab](docs/images/console-audit.jpg)
+
+Recording a new capability against a desktop application:
+
+![Recording against a desktop application](docs/images/console-record-desktop.jpg)
+
+---
 
 ## Setup
 
