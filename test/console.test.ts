@@ -131,6 +131,54 @@ describe("console server", () => {
     for (const c of catalog.capabilities) expect(["web", "desktop"]).toContain(c.surface);
   });
 
+  it("offers desktop helpers by name, and never by command", async () => {
+    const url = await start();
+    const { helpers } = await (await fetch(`${url}/api/helpers`)).json();
+
+    expect(helpers.length).toBeGreaterThan(0);
+    for (const helper of helpers) {
+      expect(helper.name).toMatch(/^[a-z][a-z0-9-]*$/);
+      // The command is not sent. Anything the page can see is something a reader will assume
+      // it can also set, and a console that ran a supplied command would turn any page the
+      // operator has open into code on their machine — it binds to localhost with no auth.
+      expect(helper).not.toHaveProperty("command");
+      expect(helper).not.toHaveProperty("args");
+      expect(helper).not.toHaveProperty("policy");
+    }
+  });
+
+  it("refuses a helper name it does not know", async () => {
+    const url = await start();
+    const res = await fetch(`${url}/api/replay`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ capabilityId: "excel_set_column_width", helper: "../../evil" }),
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("not chosen from here");
+  });
+
+  it("ignores a command the request supplies for itself", async () => {
+    // The request names a helper; it cannot describe one. A body carrying a command has
+    // nothing to act on, which is the whole reason the lookup is server-side.
+    const url = await start();
+    const res = await fetch(`${url}/api/replay`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        capabilityId: "excel_set_column_width",
+        command: "touch",
+        args: ["/tmp/should-never-exist"],
+        desktopHelper: "touch /tmp/should-never-exist",
+      }),
+    });
+
+    // Falls through to "this needs a desktop helper", because no helper was named.
+    expect(res.status).toBe(422);
+    expect((await res.json()).error).toContain("desktop surface");
+  });
+
   it("serves four tabs, each with the panel it controls", async () => {
     const url = await start();
     const page = await (await fetch(url)).text();

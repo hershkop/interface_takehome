@@ -219,9 +219,13 @@
              What it needs is a <em>helper process</em> for your platform, answering seven
              requests from macOS <code>AXUIElement</code>, Windows UI Automation or AT-SPI2.
              None ships here.</p>
-          <p><strong>To try the path today</strong>, run the reference helper against its
-             pretend application — it speaks the same protocol a real one would:</p>
-          <p><code>npm run cli -- replay &lt;artifact&gt; --desktop-helper "node scripts/desktop-helper-stub.mjs"</code></p>
+          <p><strong>To try the path today</strong>, the reference helpers are already declared
+             in <code>helpers.json</code> — pick one on a desktop capability's card and press
+             Replay. They speak the same protocol a real helper would.</p>
+          <p>A helper is declared on the machine, never chosen from this page: the page sends a
+             name and the server looks up the command. This console has no authentication, so
+             an endpoint that ran a command from a request body would be a way for any page you
+             have open to run code here.</p>
           <p><strong>To record against a real application</strong>, write that helper, then point
              the same flag at it. Nothing above the process boundary changes: a desktop artifact
              is the same document as a web one with <code>target.surface</code> set to
@@ -300,6 +304,7 @@
   const $ = (id) => document.getElementById(id);
   const runs = new Map();
   let capabilities = [];
+  let helpers = [];
 
   const esc = (s) =>
     String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -361,6 +366,18 @@
   const open = new Set();      // capability ids whose editor is expanded
   const confirming = new Set(); // capability ids awaiting delete confirmation
 
+  /** Helpers declared for this capability's application, plus any that name none. */
+  const helpersFor = (c) =>
+    helpers.filter((h) => h.app === undefined || h.app === c.artifact?.target?.app);
+
+  async function loadHelpers() {
+    try {
+      helpers = (await (await fetch("/api/helpers")).json()).helpers ?? [];
+    } catch {
+      helpers = [];
+    }
+  }
+
   async function loadCapabilities() {
     const { capabilities: list, invalid } = await (await fetch("/api/capabilities")).json();
     capabilities = list;
@@ -420,13 +437,35 @@
           <label>${esc(n)} <span style="opacity:.6">(${esc(d.type)}${d.required === false ? ", optional" : ""})</span></label>
           <input data-cap="${esc(id)}" data-input="${esc(n)}" placeholder="${esc(d.description ?? "")}" />
         `).join("")}
+        ${
+          // A desktop capability needs a helper for the run to have anything to drive. The
+          // list is whatever the machine declares in helpers.json — this picks a name, never
+          // a command, because a console that ran a command the page supplied would turn any
+          // page the operator has open into code on their machine.
+          c.surface === "desktop" && c.status !== "deprecated"
+            ? `<label>Desktop helper</label>
+               ${
+                 helpersFor(c).length === 0
+                   ? `<p class="note">None declared on this machine. Add one to
+                      <code>helpers.json</code>, or replay from the CLI with
+                      <code>--desktop-helper</code>.</p>`
+                   : `<select data-helper="${esc(id)}">
+                        ${helpersFor(c)
+                          .map((h) => `<option value="${esc(h.name)}">${esc(h.title)}</option>`)
+                          .join("")}
+                      </select>`
+               }`
+            : ""
+        }
         <div class="actions">
           ${
             // No Replay for a retired capability. The server refuses it, and a button that
             // always fails teaches an operator to distrust the buttons rather than the state.
             c.status === "deprecated"
               ? `<span class="count">deprecated — will not run</span>`
-              : `<button class="primary" data-replay="${esc(id)}">Replay</button>`
+              : c.surface === "desktop" && helpersFor(c).length === 0
+                ? `<span class="count">needs a desktop helper</span>`
+                : `<button class="primary" data-replay="${esc(id)}">Replay</button>`
           }
           <button data-edit="${esc(id)}">${open.has(id) ? "Close" : "Edit"}</button>
           <button class="danger" data-delete="${esc(id)}">Delete</button>
@@ -540,10 +579,20 @@
         if (el.value.trim()) inputs[el.dataset.input] = el.value.trim();
       });
       e.target.disabled = true;
+      const helperSelect = document.querySelector(`[data-helper="${CSS.escape(d.replay)}"]`);
+      const picked = helperSelect?.value ?? "";
+
       await fetch("/api/replay", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ capabilityId: d.replay, inputs, headed: true }),
+        body: JSON.stringify({
+          capabilityId: d.replay,
+          inputs,
+          headed: true,
+          // A name. The server resolves it against helpers.json; nothing here can name a
+          // command, which is the whole point of sending a name.
+          ...(picked ? { helper: picked } : {}),
+        }),
       });
       // The run appears on another panel now. Without this, pressing Replay looks like
       // nothing happened — the single worst thing tabs can do to a button that starts work.
@@ -848,6 +897,6 @@
     renderRuns();
   };
 
-  loadCapabilities();
+  loadHelpers().then(loadCapabilities);
   loadAudit();
 </script>
