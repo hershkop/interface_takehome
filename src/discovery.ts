@@ -131,9 +131,15 @@ const ACT_TOOL: Anthropic.Tool = {
           "anything writes to it.",
       },
       button: {
+        // No `enum` here. A nullable field cannot carry one under strict tool schemas — the
+        // API rejects `enum: ["left","right",null]` against `type: ["string","null"]` with
+        // "Enum value 'left' does not match declared type" — and every other optional field in
+        // this tool is nullable, so the constraint is expressed in prose and enforced by Zod
+        // when the action is built. A bad value comes back to the model as a tool error it can
+        // correct, which is the same path a malformed locator already takes.
         type: ["string", "null"],
-        enum: ["left", "right", null],
-        description: "Mouse button for click. Right opens context menus. Defaults to left.",
+        description:
+          'Mouse button for click: "left" or "right". Right opens context menus. Defaults to left.',
       },
       keys: {
         type: ["string", "null"],
