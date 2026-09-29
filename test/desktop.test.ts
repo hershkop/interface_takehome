@@ -295,8 +295,10 @@ describe("resolution and the action it authorises stay tied together", () => {
       resolve: () => ({ matches: [{ role: "button", name: "Log In", handle: "h1" }] }),
       click: (params: { handle: string }) => {
         // The whole point: the mutation carries the identity of the node that was checked for
-        // uniqueness. A query here would be re-matched against a tree that may have changed.
-        expect(params).toEqual({ handle: "h1" });
+        // uniqueness, and nothing that could be re-matched against a tree that has changed.
+        expect(params).toEqual({ handle: "h1", button: "left" });
+        expect(params).not.toHaveProperty("name");
+        expect(params).not.toHaveProperty("role");
         return { window: { application: APP, window: "Accounts Overview" } };
       },
     });

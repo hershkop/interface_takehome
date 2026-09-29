@@ -693,6 +693,8 @@ async function execute(
     }
     case "extract":
       return surface.extract(target!);
+    case "press":
+      return surface.press(resolve(action.keys), target);
   }
 }
 
@@ -711,7 +713,10 @@ async function gateRiskyAction(
   controller: SessionController | undefined,
   context: { runId: string; capabilityId: string; goal: string; step: number },
 ): Promise<{ decision: string; control: string; message: string } | undefined> {
-  const mutating = ["click", "fill", "select"].includes(built.action.action);
+  // `press` is in the list for the same reason as the rest: Enter on a focused Transfer button
+  // moves money exactly as clicking it does, and a risk gate that only watched the mouse would
+  // be trivially stepped around by an exploring model that reached for the keyboard.
+  const mutating = ["click", "fill", "select", "press"].includes(built.action.action);
   if (!mutating) return undefined;
 
   const descriptors: Array<string | undefined> = [
@@ -886,6 +891,11 @@ function parameteriseTarget(target: Target, request: DiscoveryRequest): Target {
         case "label":
         case "testId":
           return { ...candidate, value: swap(candidate.value) };
+        case "cell":
+          // A cell reference is a coordinate in a grid, and parameterising it is exactly as
+          // sensible as parameterising a locator's name: `{{inputs.column}}4` is a real thing
+          // a recording should produce.
+          return { ...candidate, ref: swap(candidate.ref) };
         case "coordinates":
           return candidate;
       }

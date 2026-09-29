@@ -745,6 +745,61 @@ DESKTOP_APP_PASSWORD=hunter2 npm run cli -- replay \
 The operator console refuses a desktop capability and says where to run it: it launches
 browsers and nothing else, and a platform helper is a per-machine thing to configure.
 
+### A worked example: driving Excel
+
+A login form exercises the protocol politely. A spreadsheet does not, which is why
+`scripts/excel-helper-stub.mjs` models one — ribbon, Name Box, grid, context menu, modal dialog
+— and `capabilities/excel_set_column_width.v1.json` drives it.
+
+```bash
+npm run cli -- replay capabilities/excel_set_column_width.v1.json \
+  --input column=C --input width=20 --policy policies/excel.json \
+  --desktop-helper "node scripts/excel-helper-stub.mjs" --allow-draft
+#   SUCCESS  appliedWidth = 20   selection = "Selected: C1"   model calls: 0
+
+# Same application, a workbook the policy does not allow
+#   --desktop-helper "node scripts/excel-helper-stub.mjs --document /home/private/salaries.xlsx"
+#   →  POLICY_DENIED  document /home/private/salaries.xlsx does not match any allowed
+#      document (/fixtures/**), at step 0: open_excel
+```
+
+Excel needed four things the vocabulary did not have, and each is a general gap rather than a
+spreadsheet quirk:
+
+**`press` is a verb.** The Name Box holds a typed range until Enter. A flow that filled it and
+moved on reads correctly and selects nothing — so setting a value and committing one are
+different acts, and both surfaces implement the same intent-level key names.
+
+**A click has a button.** Column Width lives on a context menu as often as on a ribbon.
+Without this, those flows fall back to coordinates, which replay refuses.
+
+**A cell is addressed by reference.** A cell's accessible name is its *value*, which changes the
+moment anything writes to it. `{ "strategy": "cell", "ref": "C4" }` is the first
+surface-specific locator strategy, added to the union rather than forked off it — the browser
+resolver returns null for it exactly as it does for coordinates, and a desktop helper with no
+grid simply matches nothing.
+
+**A grid is not a tree you can hand to a model.** `observe` reports the used range, not the
+addressable one. A sheet addresses billions of cells; returning them is a denial of service on
+the caller's own context window.
+
+### "May drive Excel" is not "may edit this workbook"
+
+`allowedApplications` is as coarse as an origin allowlist, so policy also carries
+`allowedDocuments` — globs over the document path the surface reports, which is why
+`DesktopWindow` reports `document` separately from `window`. A title is decoration an
+application renames at will ("Q3-report.xlsx — Saved — Excel"); containment a rename can walk
+past is not containment.
+
+Demanded at the landing check rather than on the navigation request: "focus Excel" cannot say
+which workbook, because that is what focusing it decides.
+
+**If you only need to change a spreadsheet, do not drive Excel.** Use `openpyxl` or COM — it is
+faster and deterministic without any of this. UI automation earns its cost when the UI *is* the
+interface: a legacy add-in with no scripting surface, a vendor tool you cannot reach otherwise.
+This repository already made that call once and wrote it down — *API for setup, UI for the task
+under automation*.
+
 Four decisions worth knowing:
 
 **Containment was the blocking problem, not porting.** `checkLanding` used to return early for

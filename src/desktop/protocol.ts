@@ -60,6 +60,18 @@ export interface DesktopWindow {
   application: string;
   /** Title of the focused window. Evidence only — never used for policy. */
   window: string;
+  /**
+   * The document this window is editing, by path, when it has one.
+   *
+   * Reported separately from the window title because policy needs it and titles are
+   * decoration: Excel shows "Q3-report.xlsx — Excel", renames on save, and appends markers
+   * the application chooses. An allowlist matched against a title is one an application can
+   * talk its way past by renaming a window.
+   *
+   * A path is not a guarantee either — a compromised application can report whatever it likes
+   * — but it is a stable identifier of the thing being changed, which a title is not.
+   */
+  document?: string;
 }
 
 /**
@@ -71,8 +83,18 @@ export interface DesktopWindow {
 export interface DesktopRequests {
   /** Bring an application to the front, launching it if it is not running. */
   focus: { params: { application: string }; result: DesktopWindow };
-  /** The current window, and its accessibility tree. */
-  observe: { params: Record<string, never>; result: { window: DesktopWindow; tree: AxNode } };
+  /**
+   * The current window, and its accessibility tree.
+   *
+   * `scope` narrows it to one node's subtree. A spreadsheet is the reason: a sheet with ten
+   * thousand rows is tens of thousands of accessibility nodes, and returning all of them is a
+   * denial-of-service on the caller's own context window. A helper is expected to report a
+   * grid's *used range* rather than its addressable one, and to say so if it truncates.
+   */
+  observe: {
+    params: { scope?: string };
+    result: { window: DesktopWindow; tree: AxNode; truncated?: boolean };
+  };
   /**
    * Every node matching a query, each carrying a handle. See "report matches" above.
    *
@@ -81,11 +103,38 @@ export interface DesktopRequests {
    * compared exactly would silently narrow every locator ever recorded.
    */
   resolve: {
-    params: { role?: string; name?: string; text?: string; exact?: boolean; visibleOnly: boolean };
+    params: {
+      role?: string;
+      name?: string;
+      text?: string;
+      /** A grid cell by reference — "C4". Helpers with no grid return no matches. */
+      cell?: string;
+      exact?: boolean;
+      visibleOnly: boolean;
+    };
     result: { matches: AxNode[] };
   };
-  /** Click the node a handle names. Reports the window the click left the session in. */
-  click: { params: { handle: string }; result: { window: DesktopWindow } };
+  /**
+   * Click the node a handle names. Reports the window the click left the session in.
+   *
+   * `button` exists because desktop applications put real operations behind the right one —
+   * a spreadsheet's column commands live in a context menu as often as on a ribbon — and a
+   * protocol without it pushes those flows into coordinates, which replay refuses.
+   */
+  click: {
+    params: { handle: string; button?: "left" | "right" };
+    result: { window: DesktopWindow };
+  };
+  /**
+   * Press a key or chord, optionally focusing a node first.
+   *
+   * Named keys rather than scan codes, matching the browser surface: "Enter", "Escape",
+   * "Control+Shift+ArrowDown". A helper translates them to whatever its platform sends.
+   */
+  key: {
+    params: { handle?: string; keys: string };
+    result: { window: DesktopWindow };
+  };
   /** Set a control's value. The helper types it; it does not paste, so the app sees key events. */
   fill: { params: { handle: string; value: string }; result: { window: DesktopWindow } };
   /** Click raw screen coordinates and report what was under the cursor. */

@@ -1,0 +1,260 @@
+{
+  "schemaVersion": "1.0",
+  "capabilityId": "excel_set_column_width",
+  "version": "1.0.0",
+  "metadata": {
+    "name": "Set a column width in Excel",
+    "description": "Select a column by reference and set its width, through the Name Box and the Column Width dialog.",
+    "status": "draft",
+    "risk": "safe",
+    "recordedAt": "2026-09-29T10:00:00.000Z",
+    "recordedBy": "human",
+    "notes": "Recorded against the reference Excel helper. The Name Box path is preferred over clicking a column header: a header is a small target whose accessible name differs between Excel versions, while the Name Box takes a range in a notation that has not changed in thirty years."
+  },
+  "target": {
+    "app": "excel",
+    "surface": "desktop",
+    "baseUrl": "app://com.microsoft.Excel"
+  },
+  "inputs": {
+    "column": {
+      "type": "string",
+      "description": "Column to resize, as a letter — C.",
+      "required": true,
+      "sensitive": false
+    },
+    "width": {
+      "type": "string",
+      "description": "New width, in Excel character units.",
+      "required": true,
+      "sensitive": false
+    }
+  },
+  "outputs": {
+    "appliedWidth": {
+      "type": "number",
+      "source": {
+        "kind": "variable",
+        "name": "shownWidth"
+      },
+      "onMissing": "fail"
+    },
+    "selection": {
+      "type": "string",
+      "source": {
+        "kind": "variable",
+        "name": "shownSelection"
+      },
+      "onMissing": "fail"
+    }
+  },
+  "steps": [
+    {
+      "id": "open_excel",
+      "action": {
+        "action": "navigate",
+        "url": "{{baseUrl}}"
+      },
+      "rationale": "Focus or launch Excel. The policy decides which application and which document."
+    },
+    {
+      "id": "focus_name_box",
+      "action": {
+        "action": "fill",
+        "target": {
+          "description": "Name Box",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "textbox",
+              "name": "Name Box",
+              "exact": true
+            }
+          ]
+        },
+        "value": "{{inputs.column}}:{{inputs.column}}"
+      },
+      "rationale": "A whole-column range. Typing it selects nothing yet — the Name Box holds a draft."
+    },
+    {
+      "id": "commit_selection",
+      "action": {
+        "action": "press",
+        "target": {
+          "description": "Name Box",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "textbox",
+              "name": "Name Box",
+              "exact": true
+            }
+          ]
+        },
+        "keys": "Enter"
+      },
+      "postcondition": {
+        "kind": "text",
+        "value": "Selected: {{inputs.column}}",
+        "visible": true
+      },
+      "rationale": "Enter is what commits it. Without this step the flow reads correctly and selects nothing, which is why press is a verb rather than a flag on fill."
+    },
+    {
+      "id": "open_column_menu",
+      "action": {
+        "action": "click",
+        "target": {
+          "description": "A cell in the selected column",
+          "candidates": [
+            {
+              "strategy": "cell",
+              "ref": "{{inputs.column}}1"
+            },
+            {
+              "strategy": "role",
+              "role": "cell",
+              "name": "Region",
+              "exact": false
+            }
+          ]
+        },
+        "button": "right"
+      },
+      "postcondition": {
+        "kind": "role",
+        "role": "menu",
+        "name": "Column"
+      },
+      "rationale": "The context menu, not the ribbon. Both reach Column Width; the menu is reachable without knowing which ribbon tab is active."
+    },
+    {
+      "id": "open_width_dialog",
+      "action": {
+        "action": "click",
+        "target": {
+          "description": "Column Width menu item",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "menuitem",
+              "name": "Column Width",
+              "exact": false
+            }
+          ]
+        },
+        "button": "left"
+      },
+      "postcondition": {
+        "kind": "role",
+        "role": "dialog",
+        "name": "Column Width"
+      },
+      "rationale": "A modal dialog with a named field — the easy half of desktop automation."
+    },
+    {
+      "id": "type_width",
+      "action": {
+        "action": "fill",
+        "target": {
+          "description": "Column width field",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "textbox",
+              "name": "Column width",
+              "exact": true
+            }
+          ]
+        },
+        "value": "{{inputs.width}}"
+      }
+    },
+    {
+      "id": "read_width",
+      "action": {
+        "action": "extract",
+        "target": {
+          "description": "Column width field",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "textbox",
+              "name": "Column width",
+              "exact": true
+            }
+          ]
+        },
+        "as": "shownWidth",
+        "coerce": "trim"
+      },
+      "rationale": "Read back from the dialog before dismissing it. After OK the value is in the document, where the accessibility tree does not report it — the only honest place to confirm what was applied is the control that took it."
+    },
+    {
+      "id": "confirm",
+      "action": {
+        "action": "click",
+        "target": {
+          "description": "OK",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "button",
+              "name": "OK",
+              "exact": true
+            }
+          ]
+        },
+        "button": "left"
+      },
+      "postcondition": {
+        "kind": "not",
+        "condition": {
+          "kind": "role",
+          "role": "dialog",
+          "name": "Column Width"
+        }
+      },
+      "rationale": "Dismissing the dialog applies the width. The postcondition asserts the dialog is gone rather than that the column changed, because the change is in the document and not on screen."
+    },
+    {
+      "id": "read_selection",
+      "action": {
+        "action": "extract",
+        "target": {
+          "description": "Selection indicator",
+          "candidates": [
+            {
+              "strategy": "role",
+              "role": "statictext",
+              "name": "Selected:",
+              "exact": false
+            }
+          ]
+        },
+        "as": "shownSelection",
+        "coerce": "trim"
+      }
+    }
+  ],
+  "handlers": [
+    {
+      "id": "dialog_rejected_value",
+      "match": {
+        "kind": "text",
+        "value": "is not valid",
+        "visible": true
+      },
+      "scope": "global",
+      "disposition": {
+        "kind": "business_outcome",
+        "outcome": "width_rejected"
+      }
+    }
+  ],
+  "checkpoint": {
+    "kind": "text",
+    "value": "Selected: {{inputs.column}}",
+    "visible": true
+  }
+}

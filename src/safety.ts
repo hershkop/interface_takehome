@@ -28,7 +28,7 @@ import type {
 } from "./schema.js";
 import type { ActionOutcome, CoordinateClickOutcome, Surface } from "./surface.js";
 import { globToRegExp } from "./surface.js";
-import { applicationOf } from "./location.js";
+import { applicationOf, windowOf } from "./location.js";
 
 export interface PolicyDecision {
   allowed: boolean;
@@ -39,11 +39,13 @@ const ALLOWED: PolicyDecision = { allowed: true };
 
 export class PolicyGuard {
   private readonly pathPatterns: RegExp[];
+  private readonly documentPatterns: RegExp[];
   private started = Date.now();
   private steps = 0;
 
   constructor(readonly policy: Policy) {
     this.pathPatterns = policy.allowedPaths.map(globToRegExp);
+    this.documentPatterns = policy.allowedDocuments.map(globToRegExp);
   }
 
   /** Restarts the budget clock. Called when a run actually begins. */
@@ -66,7 +68,10 @@ export class PolicyGuard {
    * Matched on the application alone. A window title is content the application controls, and
    * a containment check an attacker can rename their way past is not a containment check.
    */
-  checkApplication(location: string): PolicyDecision {
+  checkApplication(
+    location: string,
+    options: { requireDocument?: boolean } = {},
+  ): PolicyDecision {
     const application = applicationOf(location);
     if (application === undefined) {
       // Fails closed. A location this guard cannot identify is one it cannot police, and
@@ -83,6 +88,33 @@ export class PolicyGuard {
       };
     }
 
+    // "May drive Excel" is not "may edit this workbook". Checked against the document the
+    // surface reports rather than the window title, because a title is decoration the
+    // application renames at will and containment a rename can walk past is not containment.
+    if (this.documentPatterns.length > 0) {
+      const document = windowOf(location);
+      if (document === undefined) {
+        // Asking to enter an application names no document yet — "focus Excel" cannot say
+        // which workbook, because that is what focusing it will decide. The landing check
+        // after the action is where the answer exists, and where this is demanded.
+        if (options.requireDocument !== true) return ALLOWED;
+        return {
+          allowed: false,
+          reason:
+            `this policy names allowed documents, and the surface reported none for ` +
+            `${application}. A run that cannot say what it is editing cannot be contained.`,
+        };
+      }
+      if (!this.documentPatterns.some((re) => re.test(document))) {
+        return {
+          allowed: false,
+          reason:
+            `document ${document} does not match any allowed document ` +
+            `(${this.policy.allowedDocuments.join(", ")})`,
+        };
+      }
+    }
+
     return ALLOWED;
   }
 
@@ -92,8 +124,12 @@ export class PolicyGuard {
    * The dispatch lives here, once, so no caller has to remember that an opaque surface needs a
    * different question asked of it — which is exactly how the desktop path went unpoliced.
    */
-  checkLocation(location: string, kind: "url" | "opaque"): PolicyDecision {
-    return kind === "url" ? this.checkUrl(location) : this.checkApplication(location);
+  checkLocation(
+    location: string,
+    kind: "url" | "opaque",
+    options: { requireDocument?: boolean } = {},
+  ): PolicyDecision {
+    return kind === "url" ? this.checkUrl(location) : this.checkApplication(location, options);
   }
 
   checkUrl(url: string): PolicyDecision {
@@ -296,7 +332,10 @@ export class GuardedSurface implements Surface {
     // all — the guard silently doing nothing rather than announcing it could not help.
     const location = this.inner.currentUrl();
     if (location === "about:blank") return undefined;
-    const decision = this.guard.checkLocation(location, this.inner.locationKind);
+    // Where a run actually *is*, which is the only place a document allowlist can be enforced.
+    const decision = this.guard.checkLocation(location, this.inner.locationKind, {
+      requireDocument: true,
+    });
     if (decision.allowed) return undefined;
     return this.deny(`after acting, the session was at ${location}: ${decision.reason}`);
   }
@@ -315,10 +354,10 @@ export class GuardedSurface implements Surface {
     return this.checkLanding() ?? result;
   }
 
-  async click(target: Target): Promise<ActionOutcome> {
+  async click(target: Target, button?: "left" | "right"): Promise<ActionOutcome> {
     const refused = this.precheck("click");
     if (refused) return refused;
-    const result = await this.inner.click(target);
+    const result = await this.inner.click(target, button);
     return this.checkLanding() ?? result;
   }
 
@@ -327,6 +366,15 @@ export class GuardedSurface implements Surface {
     if (refused) return refused;
     const result = await this.inner.fill(target, value);
     return this.checkLanding() ?? result;
+  }
+
+  async press(keys: string, target?: Target): Promise<ActionOutcome> {
+    // Checked like any other mutating action: Enter on a focused Submit is a submission, and a
+    // guard that only watched the mouse would be stepped around by reaching for the keyboard.
+    const refused = this.precheck("press");
+    if (refused) return refused;
+    const outcome = await this.inner.press(keys, target);
+    return this.checkLanding() ?? outcome;
   }
 
   async select(target: Target, value: string): Promise<ActionOutcome> {

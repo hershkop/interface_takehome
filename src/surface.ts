@@ -53,9 +53,17 @@ export interface ActionOutcome {
 export interface Surface {
   observe(step: number): Promise<Observation>;
   navigate(url: string): Promise<ActionOutcome>;
-  click(target: Target): Promise<ActionOutcome>;
+  click(target: Target, button?: "left" | "right"): Promise<ActionOutcome>;
   fill(target: Target, value: string): Promise<ActionOutcome>;
   select(target: Target, value: string): Promise<ActionOutcome>;
+  /**
+   * Press a key or chord, optionally focusing a target first.
+   *
+   * Separate from `fill` because setting a value and committing one are different acts: a
+   * control can hold typed text until Enter, and a flow that filled it and moved on would look
+   * correct while having selected nothing.
+   */
+  press(keys: string, target?: Target): Promise<ActionOutcome>;
   waitFor(condition: Condition, timeoutMs: number): Promise<ActionOutcome>;
   extract(target: Target, attribute?: string): Promise<ActionOutcome>;
   /**
@@ -393,7 +401,7 @@ export class PlaywrightSurface implements Surface {
     }
   }
 
-  async click(target: Target): Promise<ActionOutcome> {
+  async click(target: Target, button: "left" | "right" = "left"): Promise<ActionOutcome> {
     return this.withTarget(target, async (locator) => {
       await locator.click({ timeout: this.defaultTimeoutMs });
       return { ok: true };
@@ -405,6 +413,26 @@ export class PlaywrightSurface implements Surface {
       await locator.fill(value, { timeout: this.defaultTimeoutMs });
       return { ok: true };
     });
+  }
+
+  /**
+   * Keys go to the focused element, or to the page when no target is given.
+   *
+   * Playwright's key names — Enter, Escape, Control+Shift+ArrowDown — are the same intent-level
+   * vocabulary an accessibility API takes, which is why this verb can be shared rather than
+   * forked per surface.
+   */
+  async press(keys: string, target?: Target): Promise<ActionOutcome> {
+    if (target === undefined) {
+      await this.page.keyboard.press(keys);
+      return { ok: true };
+    }
+    const resolved = await resolveTarget(this.page, target, { timeoutMs: this.defaultTimeoutMs });
+    if (!resolved.ok) {
+      return { ok: false, error: explainFailure(target, resolved.attempts) };
+    }
+    await resolved.locator.press(keys, { timeout: this.defaultTimeoutMs });
+    return { ok: true };
   }
 
   async select(target: Target, value: string): Promise<ActionOutcome> {

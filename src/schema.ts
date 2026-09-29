@@ -102,6 +102,33 @@ export const LocatorCandidate = z.discriminatedUnion("strategy", [
   z.object({ strategy: z.literal("testId"), value: z.string().min(1) }),
   z.object({ strategy: z.literal("css"), value: z.string().min(1) }),
   /**
+   * A grid cell by its reference — "C4", "A1". Surface-specific, and the first test of the
+   * claim that a surface-specific strategy is additive rather than a fork.
+   *
+   * It exists because a spreadsheet cell is not a named control: its accessible name is often
+   * its *value*, which changes the moment anything writes to it. A reference is the only
+   * durable way to say which cell, and a surface that has no grid refuses this candidate by
+   * name rather than pretending to resolve it.
+   */
+  z.object({
+    strategy: z.literal("cell"),
+    /**
+     * An A1-style reference, or a template that resolves to one.
+     *
+     * Templates are allowed because a cell reference is exactly the kind of thing a capability
+     * is parameterised by — `{{inputs.column}}1` is the difference between "resize column C"
+     * and "resize a column". Validating the resolved form here is impossible; what this catches
+     * is a literal that was never a reference at all.
+     */
+    ref: z
+      .string()
+      .min(1)
+      .refine(
+        (value) => /\{\{.+\}\}/.test(value) || /^[A-Z]{1,3}[0-9]{1,7}$/.test(value),
+        "an A1-style reference (C4) or a template that resolves to one",
+      ),
+  }),
+  /**
    * Coordinates are a discovery fallback only. Any artifact containing one cannot leave
    * `status: "draft"` — enforced in CapabilityArtifact's refinement below.
    */
@@ -128,7 +155,33 @@ export type Coercion = z.infer<typeof Coercion>;
 
 export const Action = z.discriminatedUnion("action", [
   z.object({ action: z.literal("navigate"), url: TemplateString }),
-  z.object({ action: z.literal("click"), target: Target }),
+  z.object({
+    action: z.literal("click"),
+    target: Target,
+    /**
+     * Which mouse button. Desktop applications put real operations behind the right button —
+     * a spreadsheet's column commands live there as often as on a ribbon — and a vocabulary
+     * that could not express one would push those flows into coordinates.
+     */
+    button: z.enum(["left", "right"]).default("left"),
+  }),
+  /**
+   * Press keys, optionally after focusing a target.
+   *
+   * A distinct verb because `fill` sets a value and some controls only *commit* one on a
+   * keystroke: Excel's Name Box holds what you typed until Enter, and a flow that filled it
+   * and moved on would look correct and select nothing. Keys are also how a desktop user
+   * reaches operations with no clickable control at all.
+   *
+   * Intent-level like everything else: "press Enter", not a scan code. Each surface maps the
+   * same names — a browser and an accessibility API both understand Enter, Tab and Escape.
+   */
+  z.object({
+    action: z.literal("press"),
+    target: Target.optional(),
+    /** A key or chord: "Enter", "Escape", "Control+Shift+ArrowDown". */
+    keys: z.string().min(1),
+  }),
   z.object({ action: z.literal("fill"), target: Target, value: TemplateString }),
   z.object({ action: z.literal("select"), target: Target, value: TemplateString }),
   z.object({ action: z.literal("wait"), condition: Condition, timeoutMs: z.number().int().positive().default(10_000) }),
@@ -145,7 +198,7 @@ export const Action = z.discriminatedUnion("action", [
 export type Action = z.infer<typeof Action>;
 
 export const ActionType = z.enum([
-  "navigate", "click", "fill", "select", "wait", "extract", "assert",
+  "navigate", "click", "fill", "select", "wait", "extract", "assert", "press",
 ]);
 export type ActionType = z.infer<typeof ActionType>;
 
@@ -343,7 +396,8 @@ export function collectTargets(artifact: ArtifactShape): Array<{ where: string; 
   const found: Array<{ where: string; target: Target }> = [];
 
   for (const [i, step] of artifact.steps.entries()) {
-    if ("target" in step.action) {
+    // `press` carries an optional target, so presence of the key is no longer enough.
+    if ("target" in step.action && step.action.target !== undefined) {
       found.push({ where: `steps[${i}] "${step.id}"`, target: step.action.target });
     }
   }
@@ -587,6 +641,18 @@ export const Policy = z.object({
    * title — a title is content the application controls, and containment must not depend on it.
    */
   allowedApplications: z.array(z.string().min(1)).default([]),
+  /**
+   * Documents a desktop run may act on, as globs over the path the surface reports.
+   *
+   * The desktop counterpart of `allowedPaths`, and needed for the same reason: an application
+   * allowlist is as coarse as an origin allowlist. "May drive Excel" says nothing about which
+   * workbook, and a capability that can open a file dialog can reach every spreadsheet on the
+   * machine while staying perfectly inside its allowlist.
+   *
+   * Empty means any document of an allowed application, which is the right default only
+   * because most applications have no document at all. Anything editing files should set it.
+   */
+  allowedDocuments: z.array(z.string()).default([]),
   /** Globs matched against pathname. Empty = any path under an allowed origin. */
   allowedPaths: z.array(z.string()).default([]),
   allowedActions: z.array(ActionType).default([...ActionType.options]),
