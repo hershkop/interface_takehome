@@ -193,7 +193,7 @@ npm run cli -- replay capabilities/transfer_funds.v1.json \
 ## The operator console
 
 ```bash
-npm run console      # http://127.0.0.1:17080
+npm run console      # http://127.0.0.1:17080  (or ./start.sh, which brings up everything)
 ```
 
 A local web console for the things a person actually needs to do: **see what capabilities
