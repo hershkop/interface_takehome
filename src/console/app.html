@@ -50,20 +50,46 @@
      mostly fields are held to a readable measure instead of being stretched across a monitor. */
   .panel.form .body { max-width: 720px; }
   /* Capability cards tile into whatever width there is rather than each spanning the screen. */
+  /* Stretch, not start: cards in a row share a height, so the grid reads as a shelf rather
+     than a ragged edge. The action row is pinned to the bottom of each card so the buttons
+     line up across the row whatever the description length. */
   #caps { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-          gap: 10px; align-items: start; }
+          gap: 12px; align-items: stretch; }
+  #caps .cap { display: flex; flex-direction: column; }
+  #caps .cap > .actions { margin-top: auto; }
   #caps > .empty, #caps > .err { grid-column: 1 / -1; }
   #caps .cap { margin-bottom: 0; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
   section > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
                  color: var(--dim); margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); }
   .body { padding: 14px; }
-  .cap { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }
-  .cap h3 { margin: 0 0 2px; font-size: 14px; font-family: ui-monospace, monospace; }
-  .cap p { margin: 0 0 8px; color: var(--dim); font-size: 12.5px; }
+  /* Cards read as objects rather than bordered regions: a slightly raised surface, a status
+     stripe down the edge, and a hover that lifts. The stripe carries the lifecycle colour so a
+     glance across the grid answers "what is approved here" without reading a single tag. */
+  .cap { position: relative; overflow: hidden;
+         background: linear-gradient(180deg, #1e2230 0%, #1b1f2b 100%);
+         border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 13px 18px;
+         margin-bottom: 10px; box-shadow: 0 1px 2px rgba(0,0,0,.35);
+         transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+  .cap::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
+                 background: var(--line); }
+  .cap.approved::before   { background: var(--ok); }
+  .cap.draft::before      { background: var(--warn); }
+  .cap.validated::before,
+  .cap.rehearsed::before  { background: var(--accent); }
+  .cap.deprecated::before { background: #3a3f4d; }
+  .cap.deprecated { opacity: .6; }
+  .cap:hover { border-color: #3c455c; box-shadow: 0 4px 14px rgba(0,0,0,.45); transform: translateY(-1px); }
+  .cap h3 { margin: 0 0 6px; font-size: 14.5px; font-family: ui-monospace, monospace;
+            letter-spacing: -.01em; }
+  .cap p { margin: 0 0 10px; color: var(--dim); font-size: 12.5px; line-height: 1.55; }
+  .cap label { margin-top: 10px; }
+  .cap .actions { margin-top: 12px; padding-top: 12px; border-top: 1px solid #242938; }
   .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
-  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line);
-         color: var(--dim); font-family: ui-monospace, monospace; }
+  .tags { margin-bottom: 10px; }
+  .tag { font-size: 10.5px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line);
+         color: var(--dim); font-family: ui-monospace, monospace; background: #171a23;
+         letter-spacing: .02em; }
   .tag.approved { color: var(--ok); border-color: #2b5f47; }
   .tag.draft { color: var(--warn); border-color: #6b551a; }
   .tag.risk { color: var(--bad); border-color: #6b2f33; }
@@ -135,9 +161,18 @@
                     text-transform: uppercase; letter-spacing: .06em; padding: 6px 10px 6px 0;
                     border-bottom: 1px solid var(--line); white-space: nowrap;
                     position: sticky; top: 0; background: var(--panel); z-index: 1; }
-  table.ledger td { padding: 5px 10px 5px 0; border-bottom: 1px solid #20242f;
+  table.ledger td { padding: 6px 10px 6px 0; border-bottom: 1px solid #20242f;
                     font-family: ui-monospace, monospace; white-space: nowrap; }
-  table.ledger th.n, table.ledger td.n { text-align: right; padding-right: 0; }
+  /* Zebra striping, then a hover row. A ledger is read across, and on a dark surface a row is
+     easy to lose halfway along — the stripe is what keeps a cost attached to its run. Applied
+     to the cell rather than the row so it sits under the sticky header's own background. */
+  table.ledger tr:nth-child(even) td { background: #1e222d; }
+  table.ledger tr:hover td { background: #262b39; }
+  table.ledger td:first-child { padding-left: 8px; }
+  table.ledger th:first-child { padding-left: 8px; }
+  /* Tabular figures, so columns of numbers line up digit for digit instead of drifting. */
+  table.ledger th.n, table.ledger td.n { text-align: right; padding-right: 8px;
+                                         font-variant-numeric: tabular-nums; }
   table.ledger tr.copy td { opacity: .5; }
   /* An em dash where a number belongs is the whole point: a gap that reads as a gap. */
   td .gap { color: var(--dim); }
@@ -461,7 +496,7 @@
     const id = c.capabilityId;
     const ins = Object.entries(c.inputs);
     return `
-      <div class="cap">
+      <div class="cap ${esc(c.status)}">
         <h3>${esc(id)}</h3>
         <div class="tags">
           <span class="tag ${c.status}">${esc(c.status)}</span>
