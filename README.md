@@ -1,944 +1,279 @@
 # Computer-Use Automation System
 
-An LLM discovers how to drive an application once; the run is recorded as a **typed, versioned
-capability artifact**; that artifact then replays **deterministically, with no model in the
-decision loop**, returning typed outputs — or a business outcome, an escalation to a human, or a
-debuggable failure.
+Compile an LLM-driven UI session into a typed capability, then replay it deterministically
+without a model in the runtime loop.
 
-The model is a **compiler**, not the runtime. It runs once, while recording. Replay is a
-deterministic machine over the artifact it produced, and every run record carries
-`modelCalls: 0` to say so.
+Discovery uses a model once to learn a workflow. The resulting versioned JSON artifact can be
+validated, reviewed, approved, and replayed with new inputs. Every replay records
+`modelCalls: 0`.
 
-Two surfaces, one vocabulary: a **web** application through a browser, and a **desktop**
-application through its platform accessibility API. The same artifact shape, the same replay
-engine, the same policy — only the surface differs.
+The same artifact and replay engine support two surfaces:
 
-Built against [ParaBank](https://github.com/parasoft/parabank), a JSP banking demo app, as a
-stand-in for the back-office systems this is really aimed at.
+- **Web:** Playwright drives ParaBank, the included demo target.
+- **Desktop:** an accessibility-based helper protocol drives native applications. Reference
+  banking and Excel helpers are included; production OS adapters are not.
 
-Design rationale and trade-offs: **[REPORT.md](REPORT.md)**. Build plan: **[PLAN.md](PLAN.md)**.
-Evidence from real runs: **[`/evidence/examples/`](evidence/examples)**.
+For the design rationale and trade-offs, see [REPORT.md](REPORT.md). For implementation history,
+see [PLAN.md](PLAN.md).
 
----
+## Quick start
 
-### The operator console
-
-Capabilities, with their lifecycle state, risk, surface and generated input forms:
-
-![The capabilities tab](docs/images/console-capabilities.jpg)
-
-Every run that has ever happened, what it did, and what it cost. Discovery is the only line
-item — replay is free by construction:
-
-![The audit tab](docs/images/console-audit.jpg)
-
-Recording a new capability against a desktop application:
-
-![Recording against a desktop application](docs/images/console-record-desktop.jpg)
-
----
-
-## Setup
-
-Requires Node 20+ and Docker.
+Requires Node.js 20+ and Docker.
 
 ```bash
 npm install
-npm run install:browsers    # downloads Chromium — npm install does NOT do this
-cp .env.example .env        # optional; the defaults work as-is
-./start.sh                  # ParaBank, seeded, plus the operator console
+npm run install:browsers
+cp .env.example .env       # optional; defaults work as-is
+./start.sh
 ```
 
-| | |
+This starts and seeds ParaBank, then launches the operator console.
+
+| Service | Default URL |
 |---|---|
-| `./start.sh` | brings ParaBank up, waits for it to be healthy, seeds the fixture data, and starts the console |
-| `./stop.sh` | stops the console and ParaBank, and clears any leftover browser processes |
-| `./logs.sh` | follows ParaBank's logs (`--console` for the console's) |
+| Operator console | <http://127.0.0.1:17080> |
+| ParaBank | <http://localhost:18080/parabank> |
 
-`./start.sh --no-console` skips the console if you only want the CLI. `./stop.sh --clean` also
-drops ParaBank's volumes. `./logs.sh --help` lists the rest.
-
-Fixture data is re-seeded on every start, deliberately: demo transfers move real money inside
-the container, so balances drift without it. Use `--no-seed` to keep whatever state is there.
-
-<details>
-<summary>The equivalent by hand</summary>
+Useful scripts:
 
 ```bash
-docker compose up -d        # starts ParaBank
-npm run setup               # seeds it and prints the demo account IDs
-npm run console             # the operator console
+./start.sh                  # start ParaBank, seed fixtures, and run the console
+./start.sh --no-console     # start only ParaBank and seed fixtures
+./stop.sh                   # stop local services
+./stop.sh --clean           # also remove ParaBank volumes
+./logs.sh                   # follow ParaBank logs; add --console for console logs
 ```
-</details>
 
-`npm run install:browsers` is not optional and `npm install` will not do it for you: the
-Playwright *package* installs from npm, but the browser binary is a separate download. Without
-it, `npm test` and `npm run probe` both fail. On Linux or CI, use
-`npx playwright install --with-deps chromium` to pull the system libraries too.
+`npm run install:browsers` is required because Playwright's Chromium binary is downloaded
+separately from the npm package. On Linux or CI, use
+`npx playwright install --with-deps chromium` instead.
 
-`npm run setup` resets ParaBank to fixed fixture state via
-`POST /services/bank/initializeDB` and verifies the accounts the demo capabilities use. It
-polls while Tomcat starts, so it is safe to run immediately after `docker compose up -d`.
+The fixture database is reset on each start so demo runs stay reproducible. Use `--no-seed` to
+preserve the current data.
 
-Seeded state it produces — stable across resets, which is what makes the committed evidence runs
-reproducible:
-
-| | |
+| Fixture | Value |
 |---|---|
 | Login | `john` / `demo` |
-| Accounts | `12345` CHECKING −2300.00 · `12678` **SAVINGS** −100.00 · 9 more |
-| Absent account | `99999` → `business_outcome: account_not_found` |
+| Savings account | `12678`, balance `-100.00` |
+| Checking account | `12345`, balance `-2300.00` |
+| Missing account | `99999` |
 
-Seeding is the *only* thing that uses ParaBank's REST API. Every automated task goes through the
-UI, which is the whole point of the system.
+## Discover and replay
 
-ParaBank is published on **18080** by default. The container itself always listens on 8080
-internally; only the host port moved, because 8080 on a developer machine is usually already
-spoken for. To use a different one, set **both** values in `.env` (the base URL is what the
-automation actually navigates to, so changing only the port would leave it pointing at the old
-address) and re-create the container:
+Discovery needs `ANTHROPIC_API_KEY` in `.env`. Replay, validation, and the committed examples do
+not call a model.
 
 ```bash
-PARABANK_PORT=19080
-PARABANK_BASE_URL=http://localhost:19080/parabank
-```
-
-```bash
-docker compose up -d --force-recreate
-```
-
-`npm run setup` prints this reminder if it can't reach the app.
-
-## Commands
-
-```bash
-npm run setup       # reset + verify the target
-npm test            # unit + browser tests
-npm run typecheck   # tsc --noEmit
-npm run probe       # surface-layer harness (development aid, not the product CLI)
-```
-
-## Demo — the whole thread
-
-```bash
-docker compose up -d && npm run setup
-
-# 1. An LLM works out the flow, once, against the live app
+# Discover a workflow and save it as a draft capability.
 npm run cli -- discover \
-  --goal "Log in, then look up account 12678 and read its balance and account type" \
+  --goal "Log in, look up account 12678, and return its balance and account type" \
   --capability lookup_balance_discovered \
   --out capabilities/lookup_balance_discovered.v1.json \
   --input accountId=12678
-#   RECORDED  lookup_balance_discovered v1.0.0   steps: 8   model calls: 10
 
-# 2. Replay it with an account the model never saw — no model in the loop
-npm run cli -- replay capabilities/lookup_balance_discovered.v1.json --input accountId=12345
-#   SUCCESS   balance = -2300   accountType = "CHECKING"   model calls: 0
+# Replay that workflow with an input the model never saw.
+npm run cli -- replay capabilities/lookup_balance_discovered.v1.json \
+  --input accountId=12345
 ```
 
-`discover` needs `ANTHROPIC_API_KEY` in `.env`. Nothing else does.
-
-## Demo — replay a capability
+Replay returns one of four typed outcomes: `success`, `business_outcome`, `escalated`, or
+`failure`. For example:
 
 ```bash
-docker compose up -d && npm run setup
-
-npm run cli -- validate capabilities/lookup_account_balance.v1.json
-
-# Success: typed outputs, no model in the loop
-npm run cli -- replay capabilities/lookup_account_balance.v1.json --input accountId=12678
-#   SUCCESS
-#     accountId   = "12678"
-#     accountType = "SAVINGS"
-#     balance     = -100
-#     model calls : 0
-
-# Business outcome: an answer, not a failure. Exit code 0.
-npm run cli -- replay capabilities/lookup_account_balance.v1.json --input accountId=99999
-#   BUSINESS OUTCOME  account_not_found
-#     requestedAccountId = "99999"
-
-# Hard failure: names the step, what was expected, what was observed
+# Successful typed result.
 npm run cli -- replay capabilities/lookup_account_balance.v1.json \
-  --input accountId=12678 --base-url http://localhost:18080/parabank/nonexistent
-#   FAILURE  CHECKPOINT_FAILED
-#     postcondition failed after "open_login": role heading named "Customer Login"
+  --input accountId=12678
 
-# Rejected before a browser even launches (~0.7s)
-npm run cli -- replay capabilities/lookup_account_balance.v1.json --input accountId=oops
-#   FAILURE  INPUT_INVALID
-
-# Refused by policy: this capability types into fields, and that policy forbids it
+# Expected application outcome; exits 0 rather than reporting a system failure.
 npm run cli -- replay capabilities/lookup_account_balance.v1.json \
-  --input accountId=12678 --policy policies/read-only.json
-#   FAILURE  POLICY_DENIED
-#     action type "fill" is blocked by policy
-#     at step 1: enter_username
+  --input accountId=99999
+
+# Input validation fails before a browser launches.
+npm run cli -- replay capabilities/lookup_account_balance.v1.json \
+  --input accountId=oops
 ```
 
-## Demo — a step that needs a human
+## Human approval
 
-`transfer_funds` moves money. Every step before the submit fills a form and can be abandoned
-safely; the submit is irreversible, so it alone is classified `approval_required`.
+Risky steps can pause for a person without handing the model control. The `transfer_funds`
+capability fills the form automatically but marks submission as `approval_required`.
 
 ```bash
-# Unattended: the caller gets `escalated`, not a guess and not a failure
+# Unattended: returns an escalation and resume token.
 npm run cli -- replay capabilities/transfer_funds.v1.json \
   --input fromAccount=12345 --input toAccount=12678 --input amount=25
-#   ESCALATED  approval_required
-#     intervention : replay-…-submit_transfer
-#     resume token : replay-…:9
 
-# With an operator: the live browser is handed over
+# Interactive: hands the live browser to the operator at the approval step.
 npm run cli -- replay capabilities/transfer_funds.v1.json \
   --input fromAccount=12345 --input toAccount=12678 --input amount=25 \
   --interactive --headed --goal "move 25 dollars between demo accounts"
 ```
 
-```
-  ┌────────────────────────────────────────────────────────────────
-  │ HUMAN INTERVENTION REQUIRED
-  ├────────────────────────────────────────────────────────────────
-  │ why        : approval_required
-  │ Step "submit_transfer" is classified approval_required and needs a person.
-  │ capability : transfer_funds
-  │ step       : 9 "submit_transfer"
-  │ page       : ParaBank | Transfer Funds
-  │ url        : http://localhost:18080/parabank/transfer.htm
-  │ screenshot : evidence/replay-…/001-intervention-submit_transfer.png
-  ├────────────────────────────────────────────────────────────────
-  │ The browser window is yours. Automation is locked out until you
-  │ hand it back.
-  │
-  │   [d]one     you performed the step yourself; skip it and continue
-  │   [p]roceed  you approve; automation performs the step
-  │   [a]bort    stop the run
-  └────────────────────────────────────────────────────────────────
-```
+During handoff, the operator can:
 
-## The operator console
+- choose `done` after performing the step manually;
+- choose `proceed` to let automation perform the approved step; or
+- choose `abort` to stop the run.
+
+An ownership lock prevents automation and the operator from acting at the same time. The run
+records the handoff and field lengths, but not the text the operator entered.
+
+## Operator console
 
 ```bash
-npm run console      # http://127.0.0.1:17080  (or ./start.sh, which brings up everything)
+npm run console
 ```
 
-A local web console for the things a person actually needs to do: **see what capabilities
-exist**, **run one**, **record a new one**, **take over when a run stops for a human**, and
-**account for what it all cost**.
+The local console can:
 
-| | |
-|---|---|
-| **Capabilities** | every artifact with its status, risk, step and handler counts, and a form generated from its declared inputs |
-| **Replay** | fill the inputs, run it, watch the events stream in, see the typed result |
-| **Record** | a goal and a capability id start a real discovery run; the recorded draft appears in the list when it finishes. The panel explains what recording actually does, how to write a goal a model can follow, and — under **Desktop** — why there is nothing to record against yet |
-| **Handoff** | a run that escalates surfaces a card with the reason, the step, the page it stopped on, and the screenshot — plus the three decisions |
-| **Review** | filter the list, add a reviewer note, promote a draft to `approved`, edit the raw artifact, or delete it |
-| **Audit** | the ledger over `evidence/` — every run on disk, how it ended, model calls, tokens and cost, with the same footnotes the CLI prints. Refreshes itself when a run finishes |
+- list, review, edit, approve, and run capabilities;
+- start web or desktop discovery runs;
+- stream run events and show typed results;
+- surface human-intervention requests; and
+- summarize model usage and cost from the evidence ledger.
 
-Those are four tabs — Audit, Runs, New, Capabilities — with the count of each on its tab, and
-the last one you used remembered across reloads. Two things are deliberately not tabbed:
-**a run waiting on a person** stays pinned above the strip, because a handoff you can only see
-on one tab is a handoff you miss, and its tab badge turns amber and reads `1 waiting`. And
-**starting a run switches you to Runs**, because a button that starts work on a panel you
-cannot see looks like a button that did nothing.
+![Capabilities in the operator console](docs/images/console-capabilities.jpg)
 
-It is **not a co-browsing surface**. When a run hands over, the operator acts in the *real
-application's* browser window — the same live session the automation was using, which is the
-entire point of the handoff. The console carries the context and the decision, not the pixels.
+The console binds to `127.0.0.1` and has no authentication. It is a development and demo tool;
+do not expose it to a network.
 
-### Reviewing a capability
+## Capability lifecycle and catalog
 
-The console is where a draft becomes trusted, so the review actions live there:
-
-- **Filter** across id, name, description, status, risk and notes.
-- **Notes** are stored on the artifact itself (`metadata.notes`), not in a sidecar — the brief
-  asks for artifacts to be *reviewable*, and why someone approved a draft is part of what a
-  later reader needs. Versioned by git, never used for control flow.
-- **Approve** flips `metadata.status`. Approving is immediately visible to agents: a draft is
-  hidden from `capabilities --json` and refused by `invoke`. It is one-way here — see below.
-- **Edit** the full artifact as JSON, validated against the same Zod schema replay uses. An
-  artifact that would not replay cannot be saved, and the schema's own issues come back to the
-  editor verbatim.
-
-#### An approved version does not change under you
-
-Approval is a statement that *this exact behaviour* was reviewed. Editing the steps of an
-approved capability while leaving its version alone makes that statement false for every agent
-already calling it by name, and leaves no signal anywhere that it happened — the capability
-approved on Tuesday is not the one running on Wednesday.
-
-So the rule is not "approved artifacts are read-only" but **a change to what an approved
-capability does must be visible as a new version**:
-
-| Edit to an approved capability | |
-|---|---|
-| Steps, handlers, inputs, outputs, target, risk, provenance | Refused unless `version` also changes |
-| `metadata.notes` | Allowed — a note changes what a reader knows, never what a run does |
-| Back to `draft` | Refused; that would be the way around the rule above |
-
-Compared by fingerprint over the artifact's executable content (`executableFingerprint`), so
-reformatting a file is not a change to it and promoting a draft is not a behavioural one. The
-catalog allows exactly one live revision per `capabilityId` — two files claiming the name are
-both rejected — so a superseded revision lives in git history, which is where this repository
-already keeps older revisions. The version bump is what makes the supersession legible.
-- **Delete** takes two clicks and **moves the file to `capabilities/.trash/`** rather than
-  unlinking it. A discovered capability can be a real model run that is not committed yet;
-  making deletion recoverable costs a rename.
-
-### What it proves
-
-REPORT.md §5 claims that swapping the operator surface "changes no other file". This is that
-claim under test rather than asserted: `WebInterventionChannel` is a second implementation of
-the same one-method `InterventionChannel` interface, and **nothing in `replay.ts`, `handoff.ts`
-or `discovery.ts` changed to support it**. The ownership lock, the context captured before
-handing over, and the fresh observation before taking control back are all untouched.
-
-The only addition anywhere else was an optional `onEvent` hook on the evidence recorder, so a
-run can be watched while it is in flight. The file on disk is still the record of truth.
-
-### Security
-
-Binds to `127.0.0.1` with **no authentication**. It can start browser sessions and read the
-evidence directory, so it is a local development and demo surface and must not be exposed.
-Evidence files are served only from under `evidence/` and only as `.png` / `.json` / `.jsonl`;
-a path resolving outside that root is refused.
-
-## Capabilities are compiled, not remembered
-
-The model is a **compiler**, not the runtime. Skills and application memory are its inputs, the
-artifact is the compiled program, and replay is a deterministic machine that executes it.
-
-```text
-goal + skills + app memory + what is on screen
-                  |
-                  v             (the only place a model runs)
-            LLM compiler
-                  |
-                  v
-        draft capability artifact
-                  |
-       validated -> rehearsed -> approved
-                  |
-                  v
-      deterministic replay, modelCalls: 0
-```
-
-### The lifecycle says what evidence it wants
-
-`draft → validated → rehearsed → approved`, with `deprecated` reachable from anywhere. Two
-states used to do this job and they were carrying different claims at once: that a person had
-read the thing, and that it actually works. Those are answered by different evidence.
-
-| Gate | Evidence | Checked by |
-|---|---|---|
-| **validated** | durable locators, a checkpoint, something reported | reading the artifact |
-| **rehearsed** | 3 clean replays of *this exact revision*, none failed | replay history on disk |
-| **approved** | a person, named | nothing — that is the point |
-| **deprecated** | none; retirement is never gated | — |
+Capabilities move through `draft → validated → rehearsed → approved`. Approval applies to the
+exact executable revision: behavioral edits require a version change and return the artifact to
+`draft`.
 
 ```bash
+npm run cli -- validate capabilities/lookup_account_balance.v1.json
 npm run cli -- promote lookup_balance_discovered
-#   draft -> validated   artifact is schema-valid, uses durable locators, and reports a result
-npm run cli -- promote lookup_balance_discovered
-#   REFUSED  validated -> rehearsed
-#     this revision has 0 clean replay(s); 3 required.
-npm run cli -- promote some_capability --by "sam"     # the approval step needs a name
+npm run cli -- promote lookup_balance_discovered --by "sam"
 npm run cli -- deprecate old_capability
-```
 
-Three things make this more than a status field:
-
-**Rehearsals are counted by content, not by name.** Every run records the artifact's
-`executableFingerprint`, and `rehearsalsFor` counts only runs of that fingerprint — so editing
-a capability resets its rehearsals rather than letting an edited revision inherit confidence
-earned by the one it replaced. A version number is a claim someone typed.
-
-**Only `approved` is agent-facing.** `rehearsed` is the interesting refusal: it has proven it
-*works*, which is not the same as anyone having decided it *should be called*. And `deprecated`
-is past every gate there is, which is why the filter names `approved` rather than testing "far
-enough along". Deprecation cannot be overridden — every other refusal is a "not yet", that one
-is a decision already made.
-
-**Every entry point goes through the same gate.** The console's raw artifact editor could
-otherwise write `approved` onto a draft directly, since `status` is deliberately outside the
-immutability fingerprint. A ladder with a side door is not a ladder.
-
-**A change to behaviour starts the ladder again.** Every state above `draft` is a claim about a
-specific revision — that *this* artifact validates, that *this* fingerprint replayed cleanly,
-that a person read *this* and signed it. Change what the capability does and all three are
-about something that no longer exists, so the new revision returns to `draft`. A version bump
-alone is not enough: bumping while leaving `approved` in place would put new, unreviewed
-behaviour into the agent-facing catalog carrying the old revision's approval. For the same
-reason an edit cannot be combined with a promotion in one save — a gate has to be answered by
-the revision it is letting through, not the one being replaced.
-
-### The compiler can emit everything replay can execute
-
-A recording run's action vocabulary is the tool schema in `src/discovery.ts`, and it has to
-match the one `replay.ts` implements. When it does not, nothing errors — the model simply never
-proposes the missing verb, and a flow that needs it is quietly unrecordable. That is how the
-Excel capability came to be replayable but not recordable: `press`, the right mouse button and
-the `cell` locator existed in the schema, both surfaces and replay, while the compiler could
-not emit them. `test/compiler-inputs.test.ts` now asserts the two vocabularies agree.
-
-The framing is scoped by surface too. Telling a model driving a spreadsheet that it is operating
-a web page is not a stylistic mismatch — it is an instruction to reach for CSS selectors that
-will never resolve. A desktop run is told there is no page and no DOM, and gets the three notes
-that only matter there: fields that hold a value until a key commits it, operations that live
-behind the right mouse button, and cells addressed by reference rather than by the value they
-happen to hold.
-
-### Skills: how to compile, versioned
-
-`skills/*.md` — markdown with a four-field frontmatter — is guidance the model reads while
-recording. Scoped `generic`, `surface:web`, `surface:desktop` or `app:<name>`, and selected
-narrowest-last so the most specific guidance sits closest to the task.
-
-Scoping is correctness, not prompt economy: a desktop recording told to prefer CSS selectors is
-being actively misled. `npm run cli -- skills` lists what is loaded.
-
-### Application memory: what we know about one app
-
-`memory/*.json` — terminology, control aliases, known dialogs, observed failure modes. The
-seeded entries are real findings from this repository's own history (the hidden error div, the
-unnamed login fields, the not-found wording).
-
-Four properties the schema enforces rather than hopes for:
-
-- **Scope is (application, surface, tenant).** Not application alone — that would blend a web
-  app's conventions with its desktop client's, and let one customer's quirks steer another's
-  recording. Cross-tenant contamination is the failure nobody notices, because the wrong memory
-  usually produces a perfectly plausible capability.
-- **Provenance is mandatory.** A memory of unknown origin is indistinguishable from a guess.
-- **Confidence and expiry are first-class.** An entry that cannot expire becomes folklore that
-  outlives the screen it described.
-- **Secrets are refused, not scrubbed.** These files are committed; scrubbing on load leaves the
-  secret in git while the loader reports everything is fine. Checked against *sensitive* keys
-  only — "the fixture seeds accounts for user john" is exactly what memory is for.
-
-### Neither can reach replay
-
-This is the guarantee the rest of the system is built on, so it is asserted rather than
-intended: `test/compiler-inputs.test.ts` walks the import graph from `src/replay.ts` and fails
-if `skills.ts` or `appmemory.ts` is reachable at any depth. If guidance could reach replay, the
-same approved capability could behave differently because someone edited a markdown file — and
-no version, fingerprint or evidence record would show it.
-
-What each artifact was compiled with is recorded on it (`metadata.compiledWith`), so a later
-regression in recording quality has a suspect list.
-
-## The audit trail
-
-Every run already writes a directory under `evidence/`. `audit` is the ledger over all of them
-— what ran, how it ended, how many model calls it took and what those cost.
-
-```bash
-npm run cli -- audit          # the table
-npm run cli -- audit --json   # the same rows, for a spreadsheet or a dashboard
-```
-
-The operator console renders the same report at the bottom of the page (`GET /api/audit`), so
-it is one reader over one set of files rather than two accountings that can disagree.
-
-Shape of the output (the committed example runs pre-date token accounting, so their own rows
-read `—`):
-
-```
-RUN                               WHAT                      OUTCOME                    CALLS        IN     OUT       COST
-discover-20260928T101318-a4k2p    lookup_balance_discovered recorded                      10    41,207   1,884    $0.2531
-replay-20260928T101655-9mz3c      lookup_balance_discovered success                        0         —       —          —
-replay-20260928T101702-r7wq1      lookup_account_balance    business_outcome:account…      0         —       —          —
-
-  3 run(s), 10 model call(s)
-  tokens : 41,207 in, 1,884 out
-  cost   : $0.2531
-```
-
-**Every replay line costs nothing, and that is the point.** Discovery is the only line item on
-the bill: the flow is worked out once by a model, and every invocation afterwards runs the
-recorded artifact with `modelCalls: 0`. The determinism claim in REPORT §3 shows up here as a
-column of zeros rather than a paragraph.
-
-Three decisions behind the numbers:
-
-**Runs store tokens; the audit computes dollars.** What a run consumed is a fact about that
-run. What it cost is a function of a price list that changes independently, so the rate card
-lives in `src/config.ts` and is applied at read time — a repricing never rewrites history.
-
-**Unknown is not zero.** A replay makes no model calls, so it costs `$0.0000` — knowable
-without any rate card. A discovery run recorded before this existed left no usage record at
-all, and shows `—`, counted in its own footer line. Folding those into the total would report
-money that was spent as free. Two more cases get the same treatment rather than a plausible
-number: a model with no entry in the rate table is reported unpriced, and a run where a request
-threw before reporting usage is marked `+`, because its tokens are a floor and not the bill.
-
-**One execution is billed once.** The committed runs under `examples/` are copies of runs also
-present under their own ids. Both rows are shown — the copies are what a reader is pointed at —
-but the copy is marked and excluded from the totals.
-
-## Demo — capabilities as agent-callable tools
-
-```bash
-npm run cli -- capabilities          # human-readable catalog — includes drafts
-npm run cli -- capabilities --json   # what an agent is given — approved only
+npm run cli -- capabilities          # human-readable catalog, including drafts
+npm run cli -- capabilities --json   # agent-facing catalog, approved only
 npm run cli -- invoke lookup_account_balance --input accountId=12678
 ```
 
-**A draft is not callable.** `invoke` refuses a capability still marked `draft` unless
-`--allow-draft` is passed, and `--json` omits drafts altogether. A warning in a description is
-documentation; an agent reads the schema and calls the tool.
+Promotion gates require durable locators and outputs, three clean rehearsals of the exact
+artifact fingerprint, and a named human approver. `invoke` refuses drafts unless
+`--allow-draft` is passed.
 
-Exit codes are the same for `invoke` as for `replay`: `0` success or business outcome, `2`
-escalated, `1` failure.
+## Audit and evidence
 
-The tool schema is **generated from the artifact**, so the advertised contract and the enforced
-one cannot drift apart. The description tells a calling agent what it gets back, whether the
-capability will stop for a human, and whether it is still a draft:
+Every run writes a directory under `evidence/` containing structured events, a typed result,
+and relevant screenshots or failure context.
 
-```json
-{
-  "name": "transfer_funds",
-  "description": "Fill the ParaBank transfer form and reach the confirmation screen … Returns:
-                  confirmedAmount (string), confirmedFrom (string), confirmedTo (string).
-                  This capability requires a human to approve a step before it completes.",
-  "input_schema": {
-    "type": "object",
-    "properties": { "fromAccount": { "type": "string", "pattern": "^[0-9]{1,10}$" }, … },
-    "required": ["fromAccount", "toAccount", "amount"],
-    "additionalProperties": false
-  }
-}
+```bash
+npm run cli -- audit
+npm run cli -- audit --json
 ```
 
-## Escalation and control transfer
+Discovery records model calls, tokens, and computed cost. Replay records zero model calls. The
+evidence layer redacts configured secrets from JSON and masks sensitive fields before screenshots
+are captured. Playwright traces are disabled by default because they may contain request bodies,
+cookies, and DOM snapshots.
 
-### The decision is three-valued, not approve/deny
+See [evidence/examples](evidence/examples) for committed sample runs.
 
-A person who takes over a live session usually does not merely *authorise* the step — they
-perform it, with judgement the automation did not have. Collapsing that into "approved" makes
-automation redo work the person already did, which on a funds transfer means transferring
-twice. So `done` skips the step and verifies where the session ended up; `proceed` has
-automation perform it; anything unclear, including an empty answer, aborts — on an irreversible
-financial action the safe reading of "no clear answer" is not to do it.
+## Safety model
 
-### The ownership lock is what makes it a handoff
+Replay is constrained at three layers:
 
-Exactly one party may act at a time, and the other is *structurally* unable to. `OwnedSurface`
-wraps the session and refuses every mutating action while a human holds it — wrapped **outside**
-the policy guard, so ownership is decided first: if a person is driving, no question about what
-policy would have permitted is even asked.
+1. The capability declares target, risk, inputs, steps, handlers, and checkpoints.
+2. Policy limits origins or applications, documents, routes, actions, risk classes, step count,
+   and runtime.
+3. The surface requires a target to resolve to exactly one visible element and verifies
+   postconditions before continuing.
 
-If automation could still click while someone is typing into the same form, control was never
-transferred; the request would just be a message. Reads stay available, because the engine has
-to observe in order to take the session back sensibly.
+The engine stops instead of guessing. It never retries a successful side-effecting action such
+as a click, fill, or select when its postcondition cannot be verified.
 
-Ownership changes **before** the request is routed, and the resumed state is captured **while
-the human still holds it** — a person finishing up is still clicking, and automation must not be
-eligible to act until the engine has seen where the page ended up. Only then does control
-return, and it returns even if the operator channel throws, because a crashed console must not
-leave a session permanently locked.
+Example policies live in [`policies/`](policies). To see a policy denial:
 
-### What the human did is recorded, without what they typed
-
-Listeners are installed with `page.addInitScript`, so they re-attach on every document. A
-one-off injection dies at the first navigation, and an audit trail that silently stops recording
-looks exactly like a person who did nothing.
-
-Each event carries the field's identity and the **length** of what was entered, never the
-characters. Reading a label off the element is safe for a `<button>Transfer</button>` and is
-exactly what an auditor wants — but on a `contenteditable` that text *is* what the person typed,
-so nothing editable contributes its content, only its stable attributes and a length.
-
-`input` is captured as well as `change`, coalesced so typing does not emit one event per
-keystroke: an edit that never blurs — because the operator submits, or the page navigates —
-fires no `change` and would otherwise vanish. Navigation is reported from the driver side,
-since a document being torn down cannot announce its own departure.
-
-Written to `human-actions.json`, separate from the event log, because "what did a person do to
-this institution's data" is a different question from "what did the system do".
-
-### What is a stand-in, and what is not
-
-The CLI operator surface is openly minimal — a real deployment routes to a queue and streams
-the session to a remote console. Swapping `CliInterventionChannel` for a queue consumer changes
-no other file.
-
-What is *not* a stand-in: ownership genuinely transfers on the same live session, the request
-carries enough context to act on, the lock is enforced rather than advised, the human's actions
-are recorded, and control comes back with a fresh observation.
-
-Exit codes let a calling agent branch without parsing output: `0` success **or** business
-outcome, `2` escalated, `1` failure. A business outcome is not an error.
-
-## Safety
-
-Every run is governed by a policy. `ReplayOptions.policy` is **required**, not optional — a
-guard that can be forgotten is not a guard, and the type checker enforces that at every call
-site. Two example policies ship in `policies/`.
-
-### Enforcement is three layers, because no one of them covers the ground
-
-**A guarded surface** wraps the browser. Every action — from the step loop, from a `dismiss`
-remedy, from a re-authentication callback, from output collection — passes through it, so an
-action type the policy blocks cannot be performed by any route. Putting the checks in the
-wrapper rather than in the replay loop is what makes them unavoidable: the loop is not the only
-thing that drives the browser.
-
-**A browser-level navigation guard** aborts document requests to origins outside the allowlist.
-This catches what a pre-action check structurally cannot: the engine is told "click this link",
-not where the link goes. A refused navigation is `POLICY_DENIED` even when the click succeeded.
-
-**A landing check after every action** compares the current URL against the allowlist. A
-single-page app routes with `history.pushState()` and issues no document request at all, so the
-network guard never sees it — a click could move from an allowed route to `/admin` and every
-later step would run there. ParaBank is server-rendered and never does this; the check exists
-because the design claim is about surfaces in general.
-
-Scope limit, stated rather than assumed: the network guard gates **document navigation only**.
-Blocking sub-resources would break pages that legitimately load styles or images from
-elsewhere. Exfiltration via XHR to an allowed-but-unexpected endpoint is not addressed.
-
-### Budgets are real, not advisory
-
-`runTimeoutMs` is enforced three ways, because checking between steps is not a ceiling: the
-guarded surface refuses actions once the deadline passes and clamps every wait to the remaining
-budget; the step loop checks between steps; and the whole run races a deadline timer, which is
-the backstop for a single operation that blocks longer than the entire budget.
-
-### The policy decides; the engine does not
-
-| Field | Effect |
-|---|---|
-| `allowedOrigins` | Exact, canonical origin match. `bank.test` never matches `bank.test.evil.com` |
-| `allowedPaths` | Glob routes. Empty means any path under an allowed origin |
-| `allowedActions` / `blockedActions` | Blocked wins over allowed, or a blocklist would be decorative |
-| `requireApprovalFor` | Which risk classes need a human. A cautious tenant can gate `safe`; a trusting one can gate nothing |
-| `maxSteps` | Checked against the artifact *before* a browser launches, and per attempt during the run |
-| `runTimeoutMs` | Wall clock for the whole run |
-| `redactPatterns` | Extends the built-in rules; never replaces them. Validated at policy load — a rule that cannot compile stops the run, because silently skipping it would fail *open* |
-
-`risk: "blocked"` is the one thing policy cannot override. Nothing executes it.
-
-The **complete** policy that governed a run is written into its `run.json` — a partial record
-cannot answer "why was this allowed?", which is the only question the record exists to answer.
-
-Inputs declared `sensitive: true` are masked by **name** in that record, not by matching their
-value. Literal scrubbing alone is not enough: the redactor deliberately ignores literals shorter
-than three characters (scrubbing every `42` out of a log destroys it), and a PIN is exactly that
-short. An explicit declaration deserves a mechanism that does not depend on the value's length.
-
-### What makes replay deterministic
-
-| | |
-|---|---|
-| **No model** | Nothing in `src/replay.ts` can call one. Every run records `modelCalls`, and the tests assert `0` on every path |
-| **Declared branches only** | Steps in order, handlers with fixed dispositions, one checkpoint. There is no runtime decision to make |
-| **Refusal over guessing** | A target must resolve to exactly one visible element. In a back-office banking app, acting on the wrong control is worse than not acting |
-| **Waits, never sleeps** | Every wait is on an observable condition with a bounded timeout |
-| **Verified, not assumed** | Postconditions prove a step did something; the final checkpoint proves the run reached the state it claims |
-
-### Nothing that already succeeded is ever re-run
-
-Re-executing a click that already submitted a funds transfer submits a second one. There are
-two paths that could do that, and both are closed:
-
-- **Recovery.** A handler matching *before* a step retries it — the step hasn't run. A handler
-  matching *after* a step that succeeded continues to the next step instead.
-- **Postconditions.** A postcondition is *polled*, so a slow confirmation is simply waited for.
-  If it still doesn't hold, only actions that can be repeated without a side effect
-  (`navigate`, `wait`, `extract`, `assert`) may be retried. A `click`, `fill` or `select` that
-  already succeeded stops the run and reports expected-vs-observed, because the application did
-  something we cannot verify — and guessing is worse than saying so.
-
-`test/replay.test.ts` pins both with fixtures that count submissions.
-
-`npm run probe` is a development harness, not the product CLI — `discover` and `replay` arrive
-with the engine. It exists so this layer can be exercised against the real application rather
-than only against synthetic pages, and so you can look at a real evidence directory:
-
+```bash
+npm run cli -- replay capabilities/lookup_account_balance.v1.json \
+  --input accountId=12678 --policy policies/read-only.json
 ```
-evidence/probe-<timestamp>/
-├── run.json                 run metadata
-├── events.jsonl             redacted structured events
-├── result.json              the four-status RunResult
-├── 001-overview.png         screenshots, sequence-numbered, sensitive regions masked
-└── failure-snapshot.json    redacted ARIA capture — the rich failure signal
-```
-
-### Evidence has three sinks, and only one of them is a string
-
-Redaction happens at the sink, but not every sink is text, so each is handled differently.
-
-| Sink | Treatment |
-|---|---|
-| **Events, results, failure snapshots** | JSON, passed through the redactor before writing |
-| **Screenshots** | Masked *at capture time* — a rendered pixel cannot be redacted afterwards. Password inputs and anything marked `data-sensitive` are painted over by Playwright before the PNG exists |
-| **Playwright traces** | **Off by default.** Opt in with `npm run probe -- --trace` |
-
-A trace archives request bodies, response bodies, cookies, and serialised DOM snapshots. On
-this target that provably includes `username=john&password=demo`, the `JSESSIONID` cookie,
-customer names, and balances — and the redactor cannot reach inside a zip. So rather than ship
-a sink that quietly defeats the redaction everything else relies on, tracing is opt-in, warns
-when enabled, and sets `traceUnredacted: true` in the run record.
-
-The default rich failure signal is `failure-snapshot.json` instead: a redacted ARIA capture,
-which is text (so it redacts), and is the same view the agent reasons over (so it is more
-useful for debugging a locator failure than a screenshot anyway).
-
-`test/evidence-secrets.test.ts` scans *every* byte of *every* file a run produces for
-configured secrets, because the first version of this claim was made by grepping the JSON and
-missing the archive.
-
-## What's here now
-
-```
-src/schema.ts    every typed contract: conditions, locators, actions, the capability
-                 artifact, handlers, policy, observations, interventions, run results
-src/discovery.ts the LLM loop that produces an artifact — used once per capability
-src/replay.ts    the deterministic interpreter: steps, handlers, checkpoints, outputs
-src/catalog.ts   artifacts as agent-callable tools
-src/audit.ts     the ledger over evidence/: outcomes, model calls, tokens, cost
-src/lifecycle.ts promotion gates: what evidence each state demands
-src/skills.ts    the versioned skill library — compiler input, never runtime
-src/appmemory.ts application-scoped memory — scoped, provenanced, expiring
-src/template.ts  {{inputs|secrets|vars|baseUrl}} resolution and output coercion
-src/cli.ts       discover | replay | validate | capabilities | invoke
-src/safety.ts    the policy guard: origins, routes, action types, risk, budgets
-src/handoff.ts   SessionController, the ownership lock, and intervention channels
-src/console/     the local web operator console (`npm run console`)
-src/parabank.ts  app-specific glue (re-authentication), injected at the edge
-src/surface.ts   the Surface port + PlaywrightSurface + condition evaluation
-src/locator.ts   candidate list -> exactly one visible element, or a refusal
-src/evidence.ts  JSONL events, screenshots, trace, result.json, model-call counter
-src/redact.ts    one redactor, applied at the sink
-src/config.ts    env + default policy
-scripts/setup.ts target reset and verification
-scripts/probe.ts development harness for the surface layer
-docs/DAY0-FINDINGS.md   what probing ParaBank actually turned up, and what it changed
-```
-
-### The surface seam
-
-Nothing above `src/surface.ts` mentions Playwright, CSS, or a browser. Artifacts and replay
-speak in intent — *click the control whose accessible name is "Transfer"*, *is this text
-visible* — and `Surface` is fourteen members: seven actions, plus observation, conditions,
-location, evidence and teardown. `src/desktop/` implements all fourteen against a platform
-accessibility API, and no artifact step changed to allow it.
-
-That is also why observation is a Playwright **ARIA snapshot** rather than a DOM dump: role and
-accessible name is the one representation a modern web app, a legacy frameset, and a native
-desktop app can all produce. It is visibility-aware by construction, far smaller than the DOM,
-and it names controls the same way the recorded locators do — so a model reading it naturally
-proposes role+name targeting instead of brittle CSS.
-
-### A capability says which surface it needs
-
-`target.surface` is `web` or `desktop`, defaulting to `web` so every artifact written before
-the field stays valid. It is declared, never inferred from `baseUrl`: the steps are
-intent-level — *click the control whose accessible name is "Transfer"* — and read identically
-whichever surface carries them out, which is exactly why the artifact alone cannot tell you.
-
-It is not decorative. `replay()` compares it against the `surfaceKind` its caller declares
-(`web` by default, matching the browser factory) and refuses a mismatch **before** anything
-launches, naming the surface. Handing a desktop artifact to a browser otherwise fails as
-`TARGET_NOT_FOUND` on step one — a true error about entirely the wrong problem.
 
 ## Desktop capabilities
 
-`src/desktop/` is the second implementation of the `Surface` port, and the argument that the
-port was real.
-
-```
-src/desktop/protocol.ts   the contract with a platform helper: seven requests, over stdio
-src/desktop/transport.ts  a child process speaking newline-delimited JSON
-src/desktop/snapshot.ts   an accessibility tree, rendered as a browser observation is
-src/desktop/surface.ts    the fourteen-member port, over that helper
-scripts/desktop-helper-stub.mjs   a reference helper over a pretend application
-```
-
-**What is done.** Everything on this side of the process boundary. A capability signs in, looks
-up an account and returns typed outputs; a missing account returns `account_not_found` from a
-handler rather than a failure; an application outside the allowlist is refused; and no password
-appears in any byte of the evidence. `test/desktop.test.ts` drives all of it through a real
-child process with real stdio framing.
-
-**What is not.** The platform half — the process that answers those seven requests from macOS
-`AXUIElement`, Windows UI Automation or AT-SPI2. `scripts/desktop-helper-stub.mjs` answers them
-from a hand-written tree instead, which makes the protocol executable rather than documentary
-and is the specification a real helper is written against. Match those seven responses against
-a live accessibility API and nothing in TypeScript changes.
+Desktop replay uses a newline-delimited JSON protocol between the TypeScript engine and a
+platform helper. This repository implements the protocol, transport, accessibility snapshots,
+policy checks, and replay surface. The included helpers model applications for tests and demos;
+real macOS AXUIElement, Windows UI Automation, or AT-SPI2 adapters are outside the project.
 
 ```bash
-# The desktop path, end to end, against the reference helper
+# Reference desktop banking helper.
 DESKTOP_APP_PASSWORD=hunter2 npm run cli -- replay \
-  capabilities/desktop_lookup_balance.v1.json --input accountId=12678 \
-  --policy policies/desktop.json --desktop-helper "node scripts/desktop-helper-stub.mjs"
-#   SUCCESS  accountType = "SAVINGS"  balance = -100   model calls: 0
+  capabilities/desktop_lookup_balance.v1.json \
+  --input accountId=12678 \
+  --policy policies/desktop.json \
+  --desktop-helper "node scripts/desktop-helper-stub.mjs"
 
-# A missing account is an answer, not a failure — the same handler contract as on the web
-#   --input accountId=99999  →  BUSINESS OUTCOME  account_not_found
-
-# And the policy governs it, by application
-#   --policy policies/parabank.json
-#   →  application com.example.DesktopBank is not in the allowlist (none configured)
-#      at step 0: open_app
+# Reference Excel helper.
+npm run cli -- replay capabilities/excel_set_column_width.v1.json \
+  --input column=C --input width=20 \
+  --policy policies/excel.json \
+  --desktop-helper "node scripts/excel-helper-stub.mjs" \
+  --allow-draft
 ```
 
-### Running one from the console
+Console-visible helpers are allowlisted in [`helpers.json`](helpers.json). The browser chooses a
+helper name; the server owns its command, arguments, and policy.
 
-There is nothing to start: the transport spawns the helper for a run and kills it after, so the
-console needs a *picker*, not a start button. A desktop capability's card shows a **Desktop
-helper** dropdown, and Replay drives it.
+## Architecture
 
-**The page picks a name; the server owns the command.** Helpers are declared in `helpers.json`
-on the machine running the console:
-
-```json
-{ "name": "excel-stub", "title": "Excel (reference stub)", "app": "excel",
-  "command": "node", "args": ["scripts/excel-helper-stub.mjs"],
-  "policy": "policies/excel.json" }
+```text
+goal + skills + application memory + observation
+                       │
+                       ▼
+                 LLM discovery
+                       │
+                       ▼
+             typed capability artifact
+                       │
+          validate → rehearse → approve
+                       │
+                       ▼
+          deterministic replay (0 model calls)
+                       │
+                       ▼
+    success | business outcome | escalation | failure
 ```
 
-That split is the whole security design. This console binds to 127.0.0.1 with **no
-authentication**, and a localhost port with no auth is reachable by any page the operator has
-open — so an endpoint that ran a command from its request body would turn "a web page you
-visited" into "code on your machine". A request naming `../../evil` gets a 400; one carrying a
-`command` of its own has nothing to act on. The command, its arguments and its policy are never
-sent to the page, only the name, title and application.
+Key modules:
 
-A helper also names the **policy** governing runs it drives, because that is the same kind of
-decision: whoever installs a platform helper for a machine also decides which applications and
-documents it may touch. Without it the console would fall back to its web policy, which allows
-no applications at all, and every desktop run would be refused for a reason that reads like a
-bug.
+| Path | Responsibility |
+|---|---|
+| `src/discovery.ts` | Model-driven capability recording |
+| `src/replay.ts` | Deterministic artifact interpreter |
+| `src/schema.ts` | Typed contracts for artifacts, policies, and results |
+| `src/surface.ts` | Shared surface interface and Playwright implementation |
+| `src/desktop/` | Desktop helper protocol, transport, and surface |
+| `src/safety.ts` | Policy enforcement and budgets |
+| `src/handoff.ts` | Ownership lock and intervention channels |
+| `src/evidence.ts` | Events, screenshots, results, and model-call accounting |
+| `src/catalog.ts` | Agent-callable capability catalog |
+| `src/console/` | Local operator console |
 
-Declaring `app` keeps the console from offering the spreadsheet helper for the banking
-capability — a choice that produces a puzzle rather than a run.
+Skills in [`skills/`](skills) and application memory in [`memory/`](memory) are inputs to
+discovery only. The import-graph tests ensure neither can affect deterministic replay.
 
-### Recording one from the console
-
-The **New** tab's Desktop panel is a form, not a description: pick a helper, write a goal, name
-the capability, list the values to parameterise, press Run discovery. It is the same flow as
-the web side, and what comes back is a draft that starts at the bottom of the lifecycle like
-any other artifact.
-
-Two things come from the helper rather than the form, because a recording is *producing* the
-artifact that would otherwise have said them: the `app://` location it starts from (`baseUrl`)
-and the surface to drive. A replay reads its entry point from the artifact; a recording has
-none to read.
-
-With no helper declared, the panel says so and explains what to add — the honest answer for a
-machine that cannot drive anything, rather than a form that cannot work.
-
-### A worked example: driving Excel
-
-A login form exercises the protocol politely. A spreadsheet does not, which is why
-`scripts/excel-helper-stub.mjs` models one — ribbon, Name Box, grid, context menu, modal dialog
-— and `capabilities/excel_set_column_width.v1.json` drives it.
+## Development
 
 ```bash
-npm run cli -- replay capabilities/excel_set_column_width.v1.json \
-  --input column=C --input width=20 --policy policies/excel.json \
-  --desktop-helper "node scripts/excel-helper-stub.mjs" --allow-draft
-#   SUCCESS  appliedWidth = 20   selection = "Selected: C1"   model calls: 0
-
-# Same application, a workbook the policy does not allow
-#   --desktop-helper "node scripts/excel-helper-stub.mjs --document /home/private/salaries.xlsx"
-#   →  POLICY_DENIED  document /home/private/salaries.xlsx does not match any allowed
-#      document (/fixtures/**), at step 0: open_excel
+npm run setup       # reset and verify the ParaBank fixtures
+npm test            # unit and browser tests
+npm run typecheck   # TypeScript checks
+npm run probe       # development harness for the surface layer
 ```
 
-Excel needed four things the vocabulary did not have, and each is a general gap rather than a
-spreadsheet quirk:
+`npm run probe` is a development aid, not the product CLI. It exercises the live surface and
+writes a representative evidence directory.
 
-**`press` is a verb.** The Name Box holds a typed range until Enter. A flow that filled it and
-moved on reads correctly and selects nothing — so setting a value and committing one are
-different acts, and both surfaces implement the same intent-level key names.
+More detail:
 
-**A click has a button.** Column Width lives on a context menu as often as on a ribbon.
-Without this, those flows fall back to coordinates, which replay refuses.
-
-**A cell is addressed by reference.** A cell's accessible name is its *value*, which changes the
-moment anything writes to it. `{ "strategy": "cell", "ref": "C4" }` is the first
-surface-specific locator strategy, added to the union rather than forked off it — the browser
-resolver returns null for it exactly as it does for coordinates, and a desktop helper with no
-grid simply matches nothing.
-
-**A grid is not a tree you can hand to a model.** `observe` reports the used range, not the
-addressable one. A sheet addresses billions of cells; returning them is a denial of service on
-the caller's own context window.
-
-### "May drive Excel" is not "may edit this workbook"
-
-`allowedApplications` is as coarse as an origin allowlist, so policy also carries
-`allowedDocuments` — globs over the document path the surface reports, which is why
-`DesktopWindow` reports `document` separately from `window`. A title is decoration an
-application renames at will ("Q3-report.xlsx — Saved — Excel"); containment a rename can walk
-past is not containment.
-
-Demanded at the landing check rather than on the navigation request: "focus Excel" cannot say
-which workbook, because that is what focusing it decides.
-
-**If you only need to change a spreadsheet, do not drive Excel.** Use `openpyxl` or COM — it is
-faster and deterministic without any of this. UI automation earns its cost when the UI *is* the
-interface: a legacy add-in with no scripting surface, a vendor tool you cannot reach otherwise.
-This repository already made that call once and wrote it down — *API for setup, UI for the task
-under automation*.
-
-Four decisions worth knowing:
-
-**Containment was the blocking problem, not porting.** `checkLanding` used to return early for
-any surface reporting opaque locations — so a desktop surface would have run with *no location
-policing at all*, the guard silently doing nothing rather than saying it could not help. Policy
-now carries `allowedApplications` beside `allowedOrigins`, and the check dispatches on the kind
-of location a surface reports. Matched on the application only: a window title is content the
-application controls, and containment that can be renamed past is not containment.
-
-**The observation format is a contract.** `renderAxSnapshot` matches Playwright's
-`ariaSnapshot` byte for byte, because discovery's prompt teaches a model to read that shape and
-the locators it proposes back are shaped by what it read. Emit a different format and recording
-quality drops with no error anywhere — which is also the clearest vindication of choosing an
-ARIA tree over a DOM dump: a browser and an OS accessibility API are two producers of the same
-thing, so this is a renderer, not a translation layer.
-
-**Resolution stays on this side, and the action it authorises is tied to it.** The helper
-returns every match with an opaque handle, `DesktopSurface` walks the candidate list in order
-and takes the first that resolves to exactly one visible node, and the mutation then addresses
-that *handle* — never the query again. Re-sending the query would reopen the gap the uniqueness
-check exists to close: the tree can change between the two requests, and the helper would act
-on whatever matches now. A handle issued against a screen that has since changed is refused,
-not re-matched.
-
-**Locations are never one action stale.** Every request that can change the screen returns the
-window it left the session in. The landing check that keeps a run inside its allowlist reads
-that value, and one action of staleness is one action executed in an application nobody
-checked — an allowed app whose button switches to another one would otherwise pass.
-
-**Two locator strategies cannot cross.** `css` and `testId` mean nothing to an accessibility
-tree, and are refused *by name* rather than skipped — a web artifact replayed on desktop should
-say which of its locators cannot survive the move, not fail with "not found".
-
-### Three schema decisions worth knowing up front
-
-**Conditions default to matching only *visible* content.** ParaBank ships the string
-*"An internal error has occurred"* inside a hidden div on every healthy account page. A handler
-matching raw DOM text would fire on every successful run. Visibility is the default; matching
-hidden content is opt-in. ([DAY0-FINDINGS §3](docs/DAY0-FINDINGS.md))
-
-**Targets are ordered candidate lists, not selectors.** Replay walks the list and requires
-*exactly one visible match* — zero matches and ambiguous matches are both failures, because a
-replay that guesses is worse than one that stops. Ordering encodes robustness preference:
-accessible role+name → label → visible text → stable id → structural CSS → coordinates. A
-coordinate target *anywhere* in an artifact — a step, an output locator, or a dismiss handler —
-blocks `approved` status, and the error names which one.
-
-**Business outcome, recoverable condition, and hard failure are declared in the artifact, not
-branched in the engine.** A `Handler` pairs a match condition with one of three dispositions.
-Recovery is never open-ended: a remedy is one of three named verbs with an attempt cap, and
-`dismiss` cannot be written without saying what to dismiss. Business outcomes are open strings
-(they are app-specific); engine failures are a closed set, so a caller can handle all of them.
-
-**Risk classification is mandatory.** `metadata.risk` has no default. A truncated recorder
-output or an incomplete generated artifact must not be able to execute unattended *by omission* —
-it fails validation instead. Defaulting to `approval_required` would be the other fail-closed
-choice, but it would put a human in front of every read-only lookup.
+- [REPORT.md](REPORT.md) — architecture, guarantees, and trade-offs
+- [PLAN.md](PLAN.md) — implementation plan and acceptance criteria
+- [docs/DAY0-FINDINGS.md](docs/DAY0-FINDINGS.md) — ParaBank findings that shaped the design
+- [evidence/examples/README.md](evidence/examples/README.md) — sample run evidence
