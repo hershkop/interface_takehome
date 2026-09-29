@@ -742,8 +742,36 @@ DESKTOP_APP_PASSWORD=hunter2 npm run cli -- replay \
 #      at step 0: open_app
 ```
 
-The operator console refuses a desktop capability and says where to run it: it launches
-browsers and nothing else, and a platform helper is a per-machine thing to configure.
+### Running one from the console
+
+There is nothing to start: the transport spawns the helper for a run and kills it after, so the
+console needs a *picker*, not a start button. A desktop capability's card shows a **Desktop
+helper** dropdown, and Replay drives it.
+
+**The page picks a name; the server owns the command.** Helpers are declared in `helpers.json`
+on the machine running the console:
+
+```json
+{ "name": "excel-stub", "title": "Excel (reference stub)", "app": "excel",
+  "command": "node", "args": ["scripts/excel-helper-stub.mjs"],
+  "policy": "policies/excel.json" }
+```
+
+That split is the whole security design. This console binds to 127.0.0.1 with **no
+authentication**, and a localhost port with no auth is reachable by any page the operator has
+open — so an endpoint that ran a command from its request body would turn "a web page you
+visited" into "code on your machine". A request naming `../../evil` gets a 400; one carrying a
+`command` of its own has nothing to act on. The command, its arguments and its policy are never
+sent to the page, only the name, title and application.
+
+A helper also names the **policy** governing runs it drives, because that is the same kind of
+decision: whoever installs a platform helper for a machine also decides which applications and
+documents it may touch. Without it the console would fall back to its web policy, which allows
+no applications at all, and every desktop run would be refused for a reason that reads like a
+bug.
+
+Declaring `app` keeps the console from offering the spreadsheet helper for the banking
+capability — a choice that produces a puzzle rather than a run.
 
 ### A worked example: driving Excel
 

@@ -18,7 +18,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { extname, join, normalize, resolve as resolvePath, sep } from "node:path";
 import { config, defaultPolicy } from "../config.js";
 import { executableFingerprint, loadCatalog } from "../catalog.js";
-import { CapabilityArtifact } from "../schema.js";
+import { CapabilityArtifact, Policy } from "../schema.js";
 import { createRedactor } from "../redact.js";
 import { isSensitiveSecretKey } from "../template.js";
 import { replay } from "../replay.js";
@@ -27,7 +27,10 @@ import { loginToParabank } from "../parabank.js";
 import { RunRegistry, WebInterventionChannel } from "./runs.js";
 import { auditRuns, rehearsalsFor } from "../audit.js";
 import { checkPromotion, nextStatus } from "../lifecycle.js";
-import { unsupportedSurfaceReason } from "../surface.js";
+import { PLAYWRIGHT_SURFACE_KIND, unsupportedSurfaceReason } from "../surface.js";
+import { DesktopSurface } from "../desktop/surface.js";
+import { StdioDesktopTransport } from "../desktop/transport.js";
+import { loadHelpers } from "./helpers.js";
 
 const CAPABILITIES_DIR = "capabilities";
 const EVIDENCE_ROOT = resolvePath("evidence");
@@ -124,6 +127,23 @@ async function route(
     return send(res, 200, await auditRuns(EVIDENCE_ROOT));
   }
 
+  if (path === "/api/helpers") {
+    const { helpers, invalid } = await loadHelpers();
+    // Names and descriptions only. The command is deliberately not sent: the page has no use
+    // for it, and anything the page can see is something a reader will assume it can also set.
+    return send(res, 200, {
+      helpers: helpers.map((h) => ({
+        name: h.name,
+        title: h.title,
+        description: h.description,
+        // Which capability this helper is for, so the page can offer the right one rather
+        // than every one. Not a security boundary — the lookup above is.
+        ...(h.app === undefined ? {} : { app: h.app }),
+      })),
+      ...(invalid === undefined ? {} : { invalid }),
+    });
+  }
+
   if (path === "/api/runs" && req.method === "GET") {
     return send(res, 200, { runs: registry.list() });
   }
@@ -201,17 +221,45 @@ async function startReplay(
     });
   }
 
+  // ── Which surface this run gets ──────────────────────────────────────────
+  //
+  // A desktop capability needs a helper, and the request names one rather than describing it.
+  // The lookup is the security boundary: the page sends "excel-stub", the server finds the
+  // command in helpers.json, and a request carrying a command of its own has nothing to act on.
+  const requestedHelper = typeof payload.helper === "string" ? payload.helper : "";
+  const { helpers } = await loadHelpers();
+  const helper = helpers.find((h) => h.name === requestedHelper);
+
+  if (requestedHelper !== "" && helper === undefined) {
+    return send(res, 400, {
+      error:
+        `no desktop helper named "${requestedHelper}". Helpers are declared in helpers.json ` +
+        `on the machine running this console, not chosen from here.`,
+    });
+  }
+
+  const surfaceOptions = helper
+    ? {
+        surfaceKind: "desktop" as const,
+        createSurface: async () =>
+          new DesktopSurface({
+            transport: new StdioDesktopTransport({ command: helper.command, args: helper.args }),
+          }),
+      }
+    : {};
+
   // Refused before a run record exists: a capability this build cannot drive should not leave
   // a failed run in the ledger, because nothing about the attempt was informative.
-  const unsupported = unsupportedSurfaceReason(entry.artifact);
+  const unsupported = unsupportedSurfaceReason(
+    entry.artifact,
+    helper ? "desktop" : PLAYWRIGHT_SURFACE_KIND,
+  );
   if (unsupported) {
-    // The console launches browsers and nothing else. Running a desktop capability needs a
-    // platform helper, which is a per-machine thing to configure — so it points at the CLI
-    // flag that takes one rather than failing with a dead end.
     return send(res, 422, {
-      error:
-        `${unsupported}. Replay it from the CLI with --desktop-helper "<command>" ` +
-        `(see src/desktop/protocol.ts, or scripts/desktop-helper-stub.mjs for a reference one)`,
+      error: helpers.length === 0
+        ? `${unsupported}. No desktop helper is declared in helpers.json on this machine — ` +
+          `add one, or replay it from the CLI with --desktop-helper "<command>".`
+        : `${unsupported}. Choose a desktop helper before replaying it.`,
     });
   }
 
@@ -219,10 +267,18 @@ async function startReplay(
   send(res, 202, { runId: run.id });
 
   // Fire and forget: the browser follows along over the event stream.
+  // A desktop helper brings its own policy: the console's default governs the web target and
+  // allows no applications at all, so using it here would refuse every desktop run for a
+  // reason that reads like a bug rather than a decision.
+  const policy = helper?.policy
+    ? Policy.parse(JSON.parse(await readFile(helper.policy, "utf8")))
+    : defaultPolicy();
+
   void replay({
+    ...surfaceOptions,
     artifact: entry.artifact,
     inputs,
-    policy: defaultPolicy(),
+    policy,
     secrets: secrets(),
     // Headed by default, because a run that escalates hands the operator a window to act in.
     // A handoff they cannot see is not a handoff.

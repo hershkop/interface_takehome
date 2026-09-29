@@ -1,0 +1,26 @@
+{
+  "helpers": [
+    {
+      "name": "excel-stub",
+      "title": "Excel (reference stub)",
+      "description": "The reference helper shaped like Excel — ribbon, Name Box, grid, context menu, dialog. No real application is driven.",
+      "command": "node",
+      "args": [
+        "scripts/excel-helper-stub.mjs"
+      ],
+      "policy": "policies/excel.json",
+      "app": "excel"
+    },
+    {
+      "name": "desktop-bank-stub",
+      "title": "Desktop bank (reference stub)",
+      "description": "The reference helper used by the desktop lookup capability. No real application is driven.",
+      "command": "node",
+      "args": [
+        "scripts/desktop-helper-stub.mjs"
+      ],
+      "policy": "policies/desktop.json",
+      "app": "DesktopBank"
+    }
+  ]
+}
