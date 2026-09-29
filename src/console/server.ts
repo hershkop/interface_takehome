@@ -57,10 +57,11 @@ export async function startConsole(
   const port = options.port ?? Number(process.env.CONSOLE_PORT ?? 17080);
   const host = options.host ?? "127.0.0.1";
   const page = await readFile(new URL("./app.html", import.meta.url), "utf8");
+  const stylesheet = await readFile(new URL("./app.css", import.meta.url));
   const capabilitiesDir = options.capabilitiesDir ?? DEFAULT_CAPABILITIES_DIR;
 
   const server = createServer((req, res) => {
-    void route(req, res, registry, page, capabilitiesDir).catch((err: unknown) => {
+    void route(req, res, registry, page, stylesheet, capabilitiesDir).catch((err: unknown) => {
       send(res, 500, { error: err instanceof Error ? err.message : String(err) });
     });
   });
@@ -84,6 +85,7 @@ async function route(
   res: ServerResponse,
   registry: RunRegistry,
   page: string,
+  stylesheet: Buffer,
   CAPABILITIES_DIR: string,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
@@ -92,6 +94,15 @@ async function route(
   if (path === "/" || path === "/index.html") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(page);
+    return;
+  }
+
+  if (path === "/app.css") {
+    res.writeHead(200, {
+      "content-type": "text/css; charset=utf-8",
+      "cache-control": "no-cache",
+    });
+    res.end(stylesheet);
     return;
   }
 
