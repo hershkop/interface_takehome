@@ -310,16 +310,58 @@ async function startDiscovery(
     return send(res, 400, { error: "ANTHROPIC_API_KEY is not set — add it to .env" });
   }
 
+  // ── Which surface this recording explores ────────────────────────────────
+  //
+  // A replay reads its entry point from the artifact; a recording is *producing* one, so it
+  // has to be told where to begin — and, for desktop, what to begin it with. Both come from
+  // the named helper rather than from the request, for the same reason the command does.
+  const requestedHelper = typeof payload.helper === "string" ? payload.helper : "";
+  const { helpers } = await loadHelpers();
+  const helper = helpers.find((h) => h.name === requestedHelper);
+
+  if (requestedHelper !== "" && helper === undefined) {
+    return send(res, 400, {
+      error:
+        `no desktop helper named "${requestedHelper}". Helpers are declared in helpers.json ` +
+        `on the machine running this console, not chosen from here.`,
+    });
+  }
+  if (helper && helper.baseUrl === undefined) {
+    return send(res, 400, {
+      error:
+        `helper "${helper.name}" declares no baseUrl, so a recording has nowhere to start. ` +
+        `Add one (app://<application>) to helpers.json.`,
+    });
+  }
+
+  const policy = helper?.policy
+    ? Policy.parse(JSON.parse(await readFile(helper.policy, "utf8")))
+    : defaultPolicy();
+
+  const surfaceOptions = helper
+    ? {
+        surfaceKind: "desktop" as const,
+        createSurface: async () =>
+          new DesktopSurface({
+            transport: new StdioDesktopTransport({ command: helper.command, args: helper.args }),
+          }),
+        // Recorded onto the artifact, so the capability declares the application it drives and
+        // the surface check refuses it on a browser later.
+        ...(helper.app === undefined ? {} : { app: helper.app }),
+      }
+    : {};
+
   const run = registry.create("discovery", capabilityId);
   send(res, 202, { runId: run.id });
 
   const out = join(CAPABILITIES_DIR, `${capabilityId}.v1.json`);
 
   void discover({
+    ...surfaceOptions,
     goal,
     capabilityId,
-    baseUrl: config.parabank.baseUrl,
-    policy: defaultPolicy(),
+    baseUrl: helper?.baseUrl ?? config.parabank.baseUrl,
+    policy,
     inputs,
     secrets: secrets(),
     headed: payload.headed !== false,

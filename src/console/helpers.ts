@@ -43,6 +43,14 @@ export const DesktopHelperEntry = z.object({
    * helper answers "no such application" for a choice the console should not have offered.
    */
   app: z.string().optional(),
+  /**
+   * Where a run starts: the `app://` location of the application this helper drives.
+   *
+   * Needed for *recording*, not replay — a replay reads its entry point from the artifact,
+   * while a recording is producing one and has to be told where to begin. Declared here for
+   * the same reason as the command: the page must not be able to name an application.
+   */
+  baseUrl: z.string().optional(),
 });
 export type DesktopHelperEntry = z.infer<typeof DesktopHelperEntry>;
 

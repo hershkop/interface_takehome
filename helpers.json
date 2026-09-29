@@ -9,7 +9,8 @@
         "scripts/excel-helper-stub.mjs"
       ],
       "policy": "policies/excel.json",
-      "app": "excel"
+      "app": "excel",
+      "baseUrl": "app://com.microsoft.Excel"
     },
     {
       "name": "desktop-bank-stub",
@@ -20,7 +21,8 @@
         "scripts/desktop-helper-stub.mjs"
       ],
       "policy": "policies/desktop.json",
-      "app": "DesktopBank"
+      "app": "DesktopBank",
+      "baseUrl": "app://com.example.DesktopBank"
     }
   ]
 }

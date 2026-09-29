@@ -773,6 +773,21 @@ bug.
 Declaring `app` keeps the console from offering the spreadsheet helper for the banking
 capability — a choice that produces a puzzle rather than a run.
 
+### Recording one from the console
+
+The **New** tab's Desktop panel is a form, not a description: pick a helper, write a goal, name
+the capability, list the values to parameterise, press Run discovery. It is the same flow as
+the web side, and what comes back is a draft that starts at the bottom of the lifecycle like
+any other artifact.
+
+Two things come from the helper rather than the form, because a recording is *producing* the
+artifact that would otherwise have said them: the `app://` location it starts from (`baseUrl`)
+and the surface to drive. A replay reads its entry point from the artifact; a recording has
+none to read.
+
+With no helper declared, the panel says so and explains what to add — the honest answer for a
+machine that cannot drive anything, rather than a form that cannot work.
+
 ### A worked example: driving Excel
 
 A login form exercises the protocol politely. A spreadsheet does not, which is why
