@@ -45,6 +45,8 @@ import {
   type SurfaceFactory,
 } from "./surface.js";
 import { isSensitiveSecretKey, resolveTemplate, type TemplateScope } from "./template.js";
+import { loadSkills, renderSkills, selectSkills } from "./skills.js";
+import { loadMemory, renderMemory, selectMemory, sensitiveValues } from "./appmemory.js";
 
 const MODEL = "claude-opus-5";
 
@@ -77,6 +79,16 @@ export interface DiscoveryRequest {
    * stated by the caller than guessed from a URL.
    */
   surfaceKind?: SurfaceKind;
+  /**
+   * Where the skill library and application memory live. Compiler inputs, both of them: they
+   * shape this prompt and reach nothing else. Replay imports neither module.
+   */
+  skillsDir?: string;
+  memoryDir?: string;
+  /** Which tenant's memory applies. Tenant-scoped entries never leak to another tenant. */
+  tenant?: string;
+  /** The application these memories are about. Defaults to the artifact's `target.app`. */
+  app?: string;
   headed?: boolean;
   evidenceRoot?: string;
   apiKey: string;
@@ -231,6 +243,46 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
     startedAt: new Date().toISOString(),
   });
 
+  // ── Compiler inputs ───────────────────────────────────────────────────────
+  //
+  // Loaded once, here, and folded into the system prompt. Their versions are recorded on the
+  // artifact so a later regression in recording quality has a suspect list — two runs of the
+  // same goal against the same application can differ purely because the guidance changed.
+  const surfaceKind = request.surfaceKind ?? "web";
+  const app = request.app ?? "parabank";
+
+  const { skills, invalid: badSkills } = await loadSkills(request.skillsDir ?? "skills");
+  const { entries: memories, invalid: badMemory } = await loadMemory(request.memoryDir ?? "memory", {
+    secrets: sensitiveValues(request.secrets),
+  });
+
+  // Reported, not swallowed. A skill file that silently stopped applying is guidance the model
+  // is no longer getting, and nothing about the run would look different.
+  for (const bad of [...badSkills, ...badMemory]) {
+    await recorder.event({ type: "compiler.input_invalid", detail: { ...bad } });
+  }
+
+  const selectedSkills = selectSkills(skills, { surface: surfaceKind, app });
+  const selectedMemory = selectMemory(memories, {
+    app,
+    surface: surfaceKind,
+    ...(request.tenant === undefined ? {} : { tenant: request.tenant }),
+  });
+
+  const renderedSkills = renderSkills(selectedSkills);
+  const renderedMemory = renderMemory(selectedMemory);
+  const system = [SYSTEM, renderedSkills.prompt, renderedMemory.prompt]
+    .filter((section) => section !== "")
+    .join("\n\n");
+
+  await recorder.event({
+    type: "compiler.inputs",
+    detail: {
+      skills: renderedSkills.provenance,
+      memory: renderedMemory.provenance,
+    },
+  });
+
   const anthropic = new Anthropic({ apiKey: request.apiKey });
   const maxSteps = Math.min(request.maxSteps ?? 25, request.policy.maxSteps);
 
@@ -285,7 +337,7 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
         model: MODEL,
         max_tokens: 4096,
         thinking: { type: "adaptive" },
-        system: SYSTEM,
+        system,
         tools: [ACT_TOOL, FINISH_TOOL, STUCK_TOOL],
         // One action per turn. The loop observes between actions, so a batch would have the
         // model deciding its second move from a page state it has not seen — exactly the
@@ -346,7 +398,12 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
         }
 
         await recorder.event({ type: "discovery.complete", detail: { steps: recorded.length } });
-        const artifact = buildArtifact(request, recorded, finish);
+        const artifact = buildArtifact(request, recorded, finish, {
+          app,
+          surface: surfaceKind,
+          skills: renderedSkills.provenance,
+          memory: renderedMemory.provenance,
+        });
         return { status: "recorded", artifact, evidenceDir: recorder.directory, modelCalls };
       }
 
@@ -713,6 +770,13 @@ function buildArtifact(
   request: DiscoveryRequest,
   recorded: RecordedStep[],
   finish: FinishInput,
+  /** What this compilation was given, recorded on the artifact it produces. */
+  compiled: {
+    app: string;
+    surface: SurfaceKind;
+    skills: { id: string; version: string }[];
+    memory: { id: string; version: string }[];
+  },
 ): CapabilityArtifact {
   const steps: ArtifactStep[] = recorded.map((entry, index) => ({
     id: `${entry.action.action}_${index}`,
@@ -767,10 +831,11 @@ function buildArtifact(
       recordedAt: new Date().toISOString(),
       recordedBy: "llm",
       model: MODEL,
+      compiledWith: { skills: compiled.skills, memory: compiled.memory },
     },
     target: {
-      app: "parabank",
-      surface: request.surfaceKind ?? "web",
+      app: compiled.app,
+      surface: compiled.surface,
       baseUrl: request.baseUrl,
     },
     inputs,

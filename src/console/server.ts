@@ -25,7 +25,8 @@ import { replay } from "../replay.js";
 import { discover } from "../discovery.js";
 import { loginToParabank } from "../parabank.js";
 import { RunRegistry, WebInterventionChannel } from "./runs.js";
-import { auditRuns } from "../audit.js";
+import { auditRuns, rehearsalsFor } from "../audit.js";
+import { checkPromotion, nextStatus } from "../lifecycle.js";
 import { unsupportedSurfaceReason } from "../surface.js";
 
 const CAPABILITIES_DIR = "capabilities";
@@ -81,6 +82,18 @@ async function route(
 
   if (path === "/api/capabilities") {
     const { entries, invalid } = await loadCatalog(CAPABILITIES_DIR);
+
+    // Evaluated here rather than in the browser: the gates read replay history off disk, and a
+    // UI that guessed at them would eventually disagree with the server that enforces them.
+    const gates = new Map<string, { ok: boolean; reason: string }>();
+    for (const e of entries) {
+      const to = nextStatus(e.status);
+      if (to === undefined) continue;
+      const rehearsals = await rehearsalsFor(executableFingerprint(e.artifact));
+      // `approvedBy` is supplied at the moment of approval, so the gate shown here reports
+      // what is still outstanding rather than pretending a signature already exists.
+      gates.set(e.capabilityId, checkPromotion(e.artifact, to, { rehearsals }));
+    }
     return send(res, 200, {
       capabilities: entries.map((e) => ({
         capabilityId: e.capabilityId,
@@ -90,6 +103,8 @@ async function route(
         status: e.status,
         risk: e.risk,
         surface: e.surface,
+        nextStatus: e.status === "deprecated" ? undefined : nextStatus(e.status),
+        gate: gates.get(e.capabilityId),
         path: e.path,
         inputs: e.artifact.inputs,
         outputs: e.artifact.outputs,
@@ -330,6 +345,27 @@ async function saveCapability(
   const submitted = parsed.data;
   const stored = entry.artifact;
 
+  // ── Status changes go through the same gates as `promote` ────────────────
+  //
+  // `status` is deliberately outside the immutability fingerprint, because promoting is not a
+  // behavioural change. That leaves this editor as a way to write any status onto any artifact
+  // — draft straight to approved, skipping every gate — unless the transition is checked here
+  // too. A ladder with a side door is not a ladder.
+  if (submitted.metadata.status !== stored.metadata.status) {
+    const rehearsals = await rehearsalsFor(executableFingerprint(stored));
+    const approvedBy = typeof payload.approvedBy === "string" ? payload.approvedBy.trim() : "";
+    const gate = checkPromotion(stored, submitted.metadata.status, {
+      rehearsals,
+      ...(approvedBy ? { approvedBy } : {}),
+    });
+
+    if (!gate.ok) {
+      return send(res, 409, {
+        error: `${stored.metadata.status} -> ${submitted.metadata.status} refused: ${gate.reason}`,
+      });
+    }
+  }
+
   if (stored.metadata.status === "approved") {
     const changed = executableFingerprint(stored) !== executableFingerprint(submitted);
 
@@ -342,16 +378,6 @@ async function saveCapability(
       });
     }
 
-    // Withdrawal would otherwise be the way around the rule above: set it back to draft, edit
-    // freely, approve again, same version, no trace. Un-approving is a real operation, but it
-    // is a version-level decision and not something an edit form should do as a side effect.
-    if (submitted.metadata.status !== "approved") {
-      return send(res, 409, {
-        error:
-          `"${capabilityId}" v${stored.version} is approved and cannot be returned to draft here. ` +
-          `Supersede it with a new version instead.`,
-      });
-    }
   }
 
   // A reviewer note is free text a human pasted in, which makes it the likeliest place for a

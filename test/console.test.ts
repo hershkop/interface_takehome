@@ -342,7 +342,7 @@ describe("capability management", () => {
 
     const res = await put(url, approved.capabilityId, withdrawn);
     expect(res.status).toBe(409);
-    expect((await res.json()).error).toContain("cannot be returned to draft");
+    expect((await res.json()).error).toContain("does not go back to");
   });
 
   it("leaves drafts editable in place, which is what a draft is for", async () => {

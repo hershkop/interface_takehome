@@ -277,6 +277,105 @@ evidence directory, so it is a local development and demo surface and must not b
 Evidence files are served only from under `evidence/` and only as `.png` / `.json` / `.jsonl`;
 a path resolving outside that root is refused.
 
+## Capabilities are compiled, not remembered
+
+The model is a **compiler**, not the runtime. Skills and application memory are its inputs, the
+artifact is the compiled program, and replay is a deterministic machine that executes it.
+
+```text
+goal + skills + app memory + what is on screen
+                  |
+                  v             (the only place a model runs)
+            LLM compiler
+                  |
+                  v
+        draft capability artifact
+                  |
+       validated -> rehearsed -> approved
+                  |
+                  v
+      deterministic replay, modelCalls: 0
+```
+
+### The lifecycle says what evidence it wants
+
+`draft → validated → rehearsed → approved`, with `deprecated` reachable from anywhere. Two
+states used to do this job and they were carrying different claims at once: that a person had
+read the thing, and that it actually works. Those are answered by different evidence.
+
+| Gate | Evidence | Checked by |
+|---|---|---|
+| **validated** | durable locators, a checkpoint, something reported | reading the artifact |
+| **rehearsed** | 3 clean replays of *this exact revision*, none failed | replay history on disk |
+| **approved** | a person, named | nothing — that is the point |
+| **deprecated** | none; retirement is never gated | — |
+
+```bash
+npm run cli -- promote lookup_balance_discovered
+#   draft -> validated   artifact is schema-valid, uses durable locators, and reports a result
+npm run cli -- promote lookup_balance_discovered
+#   REFUSED  validated -> rehearsed
+#     this revision has 0 clean replay(s); 3 required.
+npm run cli -- promote some_capability --by "sam"     # the approval step needs a name
+npm run cli -- deprecate old_capability
+```
+
+Three things make this more than a status field:
+
+**Rehearsals are counted by content, not by name.** Every run records the artifact's
+`executableFingerprint`, and `rehearsalsFor` counts only runs of that fingerprint — so editing
+a capability resets its rehearsals rather than letting an edited revision inherit confidence
+earned by the one it replaced. A version number is a claim someone typed.
+
+**Only `approved` is agent-facing.** `rehearsed` is the interesting refusal: it has proven it
+*works*, which is not the same as anyone having decided it *should be called*. And `deprecated`
+is past every gate there is, which is why the filter names `approved` rather than testing "far
+enough along". Deprecation cannot be overridden — every other refusal is a "not yet", that one
+is a decision already made.
+
+**Every entry point goes through the same gate.** The console's raw artifact editor could
+otherwise write `approved` onto a draft directly, since `status` is deliberately outside the
+immutability fingerprint. A ladder with a side door is not a ladder.
+
+### Skills: how to compile, versioned
+
+`skills/*.md` — markdown with a four-field frontmatter — is guidance the model reads while
+recording. Scoped `generic`, `surface:web`, `surface:desktop` or `app:<name>`, and selected
+narrowest-last so the most specific guidance sits closest to the task.
+
+Scoping is correctness, not prompt economy: a desktop recording told to prefer CSS selectors is
+being actively misled. `npm run cli -- skills` lists what is loaded.
+
+### Application memory: what we know about one app
+
+`memory/*.json` — terminology, control aliases, known dialogs, observed failure modes. The
+seeded entries are real findings from this repository's own history (the hidden error div, the
+unnamed login fields, the not-found wording).
+
+Four properties the schema enforces rather than hopes for:
+
+- **Scope is (application, surface, tenant).** Not application alone — that would blend a web
+  app's conventions with its desktop client's, and let one customer's quirks steer another's
+  recording. Cross-tenant contamination is the failure nobody notices, because the wrong memory
+  usually produces a perfectly plausible capability.
+- **Provenance is mandatory.** A memory of unknown origin is indistinguishable from a guess.
+- **Confidence and expiry are first-class.** An entry that cannot expire becomes folklore that
+  outlives the screen it described.
+- **Secrets are refused, not scrubbed.** These files are committed; scrubbing on load leaves the
+  secret in git while the loader reports everything is fine. Checked against *sensitive* keys
+  only — "the fixture seeds accounts for user john" is exactly what memory is for.
+
+### Neither can reach replay
+
+This is the guarantee the rest of the system is built on, so it is asserted rather than
+intended: `test/compiler-inputs.test.ts` walks the import graph from `src/replay.ts` and fails
+if `skills.ts` or `appmemory.ts` is reachable at any depth. If guidance could reach replay, the
+same approved capability could behave differently because someone edited a markdown file — and
+no version, fingerprint or evidence record would show it.
+
+What each artifact was compiled with is recorded on it (`metadata.compiledWith`), so a later
+regression in recording quality has a suspect list.
+
 ## The audit trail
 
 Every run already writes a directory under `evidence/`. `audit` is the ledger over all of them
@@ -548,6 +647,9 @@ src/discovery.ts the LLM loop that produces an artifact — used once per capabi
 src/replay.ts    the deterministic interpreter: steps, handlers, checkpoints, outputs
 src/catalog.ts   artifacts as agent-callable tools
 src/audit.ts     the ledger over evidence/: outcomes, model calls, tokens, cost
+src/lifecycle.ts promotion gates: what evidence each state demands
+src/skills.ts    the versioned skill library — compiler input, never runtime
+src/appmemory.ts application-scoped memory — scoped, provenanced, expiring
 src/template.ts  {{inputs|secrets|vars|baseUrl}} resolution and output coercion
 src/cli.ts       discover | replay | validate | capabilities | invoke
 src/safety.ts    the policy guard: origins, routes, action types, risk, budgets
