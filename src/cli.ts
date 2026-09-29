@@ -366,7 +366,7 @@ const CAPABILITIES_DIR = "capabilities";
 /**
  * The audit table.
  *
- * Ordered oldest-first and printed in full rather than paged or filtered: the value of an audit
+ * Most recent first, and printed in full rather than paged or filtered: the value of an audit
  * is that it is the whole ledger, and a tool that decides for you which runs are interesting is
  * a tool you have to audit in turn.
  */

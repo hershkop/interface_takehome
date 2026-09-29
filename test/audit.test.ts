@@ -347,8 +347,10 @@ describe("auditRuns", () => {
     });
 
     const report = await auditRuns(root);
-    // Alphabetically this would be discover-late, replay-early, zzz-undated — a history that
-    // never happened. Runs with no start time sort last so the order stays stable.
-    expect(report.rows.map((r) => r.dir)).toEqual(["replay-early", "discover-late", "zzz-undated"]);
+    // Newest first: a ledger is read to answer "what just happened" far more often than "how
+    // did this start". Alphabetically this would be discover-late, replay-early, zzz-undated —
+    // a history that never happened. Undated rows still sort last, never first: putting the
+    // least identifiable row at the top would push the answer off the screen.
+    expect(report.rows.map((r) => r.dir)).toEqual(["discover-late", "replay-early", "zzz-undated"]);
   });
 });
