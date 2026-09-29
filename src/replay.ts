@@ -651,7 +651,9 @@ async function executeStep(
           : fail(step, index, result.errorCode ?? "APP_ERROR", result.error ?? "navigation failed");
       }
       case "click": {
-        const result = await surface.click(resolveTarget(action.target));
+        // The button travels with the action. Dropped, a recorded right-click replays as a
+        // left-click: it resolves, it succeeds, and it does something else entirely.
+        const result = await surface.click(resolveTarget(action.target), action.button);
         return result.ok
           ? { ok: true }
           : fail(step, index, result.errorCode ?? "APP_ERROR", result.error ?? "click failed");
@@ -667,6 +669,18 @@ async function executeStep(
         return result.ok
           ? { ok: true }
           : fail(step, index, result.errorCode ?? "APP_ERROR", result.error ?? "select failed");
+      }
+      case "press": {
+        // Keys, optionally to a focused control. A missing case here is why the first Excel
+        // run selected nothing and still reported every step as fine — the verb existed in the
+        // vocabulary, the port and the surfaces, and replay quietly did not perform it.
+        const result = await surface.press(
+          resolve(action.keys),
+          action.target === undefined ? undefined : resolveTarget(action.target),
+        );
+        return result.ok
+          ? { ok: true }
+          : fail(step, index, result.errorCode ?? "APP_ERROR", result.error ?? "press failed");
       }
       case "wait": {
         const result = await surface.waitFor(resolveCondition(action.condition), action.timeoutMs);
@@ -755,6 +769,10 @@ function isRepeatableAfterSuccess(action: ArtifactStep["action"]): boolean {
     case "click":
     case "fill":
     case "select":
+      return false;
+    case "press":
+      // A keystroke is the least repeatable thing here. Enter commits, Delete deletes, and a
+      // chord can fire a macro — none of which a retry can take back.
       return false;
   }
 }

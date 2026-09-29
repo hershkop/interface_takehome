@@ -215,12 +215,16 @@ export class OwnedSurface implements Surface {
     return this.humanHolds ? this.locked("navigate") : this.inner.navigate(url);
   }
 
-  async click(target: Target): Promise<ActionOutcome> {
-    return this.humanHolds ? this.locked("click") : this.inner.click(target);
+  async click(target: Target, button?: "left" | "right"): Promise<ActionOutcome> {
+    return this.humanHolds ? this.locked("click") : this.inner.click(target, button);
   }
 
   async fill(target: Target, value: string): Promise<ActionOutcome> {
     return this.humanHolds ? this.locked("fill") : this.inner.fill(target, value);
+  }
+
+  async press(keys: string, target?: Target): Promise<ActionOutcome> {
+    return this.humanHolds ? this.locked("press") : this.inner.press(keys, target);
   }
 
   async select(target: Target, value: string): Promise<ActionOutcome> {

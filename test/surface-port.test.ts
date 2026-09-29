@@ -72,6 +72,13 @@ class FakeDesktopSurface implements Surface {
     return { ok: true };
   }
 
+  async press(keys: string, target?: Target): Promise<ActionOutcome> {
+    // The pretend application has no keyboard handling; recording the press is enough to show
+    // the port carries the verb and nothing above it had to change to gain one.
+    this.acted.push(`press ${keys}${target ? " on a target" : ""}`);
+    return { ok: true };
+  }
+
   async select(target: Target, value: string): Promise<ActionOutcome> {
     return this.fill(target, value);
   }

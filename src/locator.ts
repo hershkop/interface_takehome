@@ -43,6 +43,8 @@ export function describeCandidate(c: LocatorCandidate): string {
       return `testId=${JSON.stringify(c.value)}`;
     case "css":
       return `css=${JSON.stringify(c.value)}`;
+    case "cell":
+      return `cell=${c.ref}`;
     case "coordinates":
       return `coordinates=(${c.x}, ${c.y})`;
   }
@@ -66,6 +68,12 @@ function buildLocator(page: Page, c: LocatorCandidate): Locator | null {
       return page.getByTestId(c.value);
     case "css":
       return page.locator(c.value);
+    case "cell":
+      // A browser has no grid to address. Returning null makes the candidate unbuildable, and
+      // the resolver moves to the next one — the same treatment coordinates get, and the same
+      // shape as a desktop surface refusing `css`. The vocabulary is shared; not every word in
+      // it means something on every surface.
+      return null;
     case "coordinates":
       return null;
   }

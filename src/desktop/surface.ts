@@ -52,6 +52,8 @@ interface NodeQuery {
   role?: string;
   name?: string;
   text?: string;
+  /** A grid cell reference. Only a surface with a grid behind it can answer one. */
+  cell?: string;
   /** Carried from the candidate. Names match as substrings unless the artifact says otherwise. */
   exact?: boolean;
 }
@@ -89,7 +91,7 @@ export class DesktopSurface implements Surface {
     const { window, tree } = await this.transport.request("observe", {});
     this.where = window;
     return {
-      url: desktopLocation(window.application, window.window),
+      url: this.locationOf(window),
       title: window.window,
       ariaSnapshot: renderAxSnapshot(tree),
       alerts: collectAlerts(tree),
@@ -101,7 +103,19 @@ export class DesktopSurface implements Surface {
     // Before the first observation there is no window to name. `about:blank` is what the
     // browser surface reports in the same state, and the landing check already skips it.
     if (!this.where) return "about:blank";
-    return desktopLocation(this.where.application, this.where.window);
+    return this.locationOf(this.where);
+  }
+
+  /**
+   * The location the policy guard sees: application, then the *document* if there is one.
+   *
+   * The document rather than the window title, because that is what an allowlist has to be
+   * written against. A title is decoration an application renames at will — "Q3-report.xlsx —
+   * Excel", then "Q3-report.xlsx — Saved" — and containment that a rename can walk past is
+   * not containment. The title stays in `Observation.title`, where it is evidence.
+   */
+  private locationOf(window: DesktopWindow): string {
+    return desktopLocation(window.application, window.document ?? window.window);
   }
 
   // ── Actions ───────────────────────────────────────────────────────────────
@@ -125,7 +139,7 @@ export class DesktopSurface implements Surface {
     }
   }
 
-  async click(target: Target): Promise<ActionOutcome> {
+  async click(target: Target, button: "left" | "right" = "left"): Promise<ActionOutcome> {
     const resolved = await this.resolveTarget(target);
     if ("error" in resolved) return fail(resolved.error);
 
@@ -133,7 +147,36 @@ export class DesktopSurface implements Surface {
       // Addressed by the handle the resolution issued, not by re-sending the query. Sending
       // the query again would let the helper act on whatever matches *now*, which is the same
       // wrong click the uniqueness check was there to prevent, arriving a moment later.
-      const { window } = await this.transport.request("click", { handle: resolved.handle });
+      const { window } = await this.transport.request("click", {
+        handle: resolved.handle,
+        button,
+      });
+      this.where = window;
+      return ok();
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /**
+   * Keys, optionally to a focused node.
+   *
+   * With no target they go wherever focus already is, which is how a grid is driven: select a
+   * range, then send Control+Shift+ArrowDown without naming anything.
+   */
+  async press(keys: string, target?: Target): Promise<ActionOutcome> {
+    let handle: string | undefined;
+    if (target !== undefined) {
+      const resolved = await this.resolveTarget(target);
+      if ("error" in resolved) return fail(resolved.error);
+      handle = resolved.handle;
+    }
+
+    try {
+      const { window } = await this.transport.request("key", {
+        ...(handle === undefined ? {} : { handle }),
+        keys,
+      });
       this.where = window;
       return ok();
     } catch (err) {
@@ -380,6 +423,11 @@ export class DesktopSurface implements Surface {
             describe: `text=${JSON.stringify(candidate.value)}`,
             query: { text: candidate.value },
           });
+          break;
+        case "cell":
+          // The surface-specific strategy the design said would be additive rather than a
+          // fork. A helper with no grid simply matches nothing, and the walk moves on.
+          usable.push({ describe: `cell=${candidate.ref}`, query: { cell: candidate.ref } });
           break;
         case "css":
         case "testId":

@@ -210,6 +210,13 @@ export function resolveTargetTemplates(
       ) {
         return { ...candidate, value: swap(candidate.value) };
       }
+      // A cell reference is a parameter like any other — `{{inputs.column}}1` is the whole
+      // difference between "resize column C" and "resize a column". Left out, the reference
+      // reaches the surface as literal template text, matches nothing, and the target quietly
+      // falls through to whatever candidate is next: a different cell, acted on successfully.
+      if (candidate.strategy === "cell" && typeof candidate.ref === "string") {
+        return { ...candidate, ref: swap(candidate.ref) };
+      }
       return candidate;
     }),
   };

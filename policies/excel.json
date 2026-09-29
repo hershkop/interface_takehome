@@ -1,0 +1,10 @@
+{
+  "allowedOrigins": [],
+  "allowedApplications": ["com.microsoft.Excel"],
+  "allowedDocuments": ["/fixtures/**"],
+  "allowedActions": ["navigate", "click", "fill", "select", "wait", "extract", "assert", "press"],
+  "riskyControls": ["^save$", "^delete", "^overwrite", "^insert$", "confirm"],
+  "maxSteps": 40,
+  "runTimeoutMs": 300000,
+  "redactPatterns": []
+}
