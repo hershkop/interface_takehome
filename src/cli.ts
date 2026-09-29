@@ -46,6 +46,7 @@ interface ParsedArgs {
   desktopHelper: string | undefined;
   by: string | undefined;
   to: string | undefined;
+  tenant: string | undefined;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -60,6 +61,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let desktopHelper: string | undefined;
   let by: string | undefined;
   let to: string | undefined;
+  let tenant: string | undefined;
 
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -77,6 +79,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       capability = argv[++i];
     } else if (arg === "--out") {
       out = argv[++i];
+    } else if (arg === "--tenant") {
+      tenant = argv[++i];
     } else if (arg === "--by") {
       by = argv[++i];
     } else if (arg === "--to") {
@@ -108,6 +112,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     desktopHelper,
     by,
     to,
+    tenant,
   };
 }
 
@@ -460,8 +465,22 @@ async function printSkills(): Promise<void> {
 async function printMemory(args: ParsedArgs): Promise<void> {
   const { entries, invalid } = await loadMemory("memory", { secrets: sensitiveValues(cliSecrets()) });
 
-  process.stdout.write(`\n${entries.length} live memory entr(ies)\n\n`);
-  for (const entry of entries) {
+  // Filtered exactly as a recording run filters: an entry with no tenant belongs to all of
+  // them, one naming a different tenant is invisible. Showing every tenant's entries under a
+  // --tenant flag would make this command answer a different question than the one the prompt
+  // is built from, which is the question an operator is actually asking.
+  const shown =
+    args.tenant === undefined
+      ? entries
+      : entries.filter((e) => e.scope.tenant === undefined || e.scope.tenant === args.tenant);
+
+  process.stdout.write(
+    `\n${shown.length} live memory entr(ies)` +
+      (args.tenant === undefined
+        ? ` across all tenants\n\n`
+        : ` visible to tenant "${args.tenant}" (of ${entries.length})\n\n`),
+  );
+  for (const entry of shown) {
     const scope = [
       entry.scope.app,
       entry.scope.surface,
@@ -469,10 +488,10 @@ async function printMemory(args: ParsedArgs): Promise<void> {
     ].join(" / ");
     process.stdout.write(`  ${entry.id}  v${entry.version}  [${scope}]  ${entry.confidence}\n`);
     process.stdout.write(`    ${entry.fact}\n`);
-    process.stdout.write(`    source: ${entry.provenance.source}\n\n`);
+    process.stdout.write(`    source: ${entry.provenance.source}  ·  owner: ${entry.owner}\n\n`);
   }
   for (const bad of invalid) process.stderr.write(`  REFUSED  ${bad.path}: ${bad.reason}\n`);
-  if (args.json) process.stdout.write(`${JSON.stringify(entries, null, 2)}\n`);
+  if (args.json) process.stdout.write(`${JSON.stringify(shown, null, 2)}\n`);
 }
 
 async function printAudit(asJson: boolean): Promise<void> {

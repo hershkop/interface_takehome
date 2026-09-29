@@ -11,6 +11,7 @@
  * evidence a program can gather that substitutes for someone deciding this capability should
  * be callable unattended. Pretending otherwise would be the whole point, missed.
  */
+import { collectTargets } from "./schema.js";
 import type { CapabilityArtifact, CapabilityStatus } from "./schema.js";
 
 /** Forward order. `deprecated` is not in it — retirement is reachable from anywhere. */
@@ -62,14 +63,17 @@ export function checkValidated(artifact: CapabilityArtifact): GateResult {
 
   // A coordinate is a screenshot's opinion about where something was. Replay refuses them
   // outright, so an artifact carrying one has a step that cannot run.
-  const coordinateSteps = artifact.steps
-    .filter((step) => {
-      const target = "target" in step.action ? step.action.target : undefined;
-      return target?.candidates.some((c) => c.strategy === "coordinates") ?? false;
-    })
-    .map((step) => step.id);
-  if (coordinateSteps.length > 0) {
-    problems.push(`coordinate locators in step(s): ${coordinateSteps.join(", ")}`);
+  //
+  // Walked with `collectTargets`, which is there precisely so a rule about locators applies to
+  // every place a locator can appear — step actions, output sources and dismiss handlers —
+  // "rather than to whichever locations someone remembered", as its own comment puts it. The
+  // first version of this gate remembered steps, and passed an artifact whose *output* was
+  // read from a coordinate.
+  const coordinates = collectTargets(artifact)
+    .filter(({ target }) => target.candidates.some((c) => c.strategy === "coordinates"))
+    .map(({ where }) => where);
+  if (coordinates.length > 0) {
+    problems.push(`coordinate locators at: ${coordinates.join(", ")}`);
   }
 
   // Without a checkpoint, "it replayed" means only "nothing threw" — which is not a claim
@@ -179,8 +183,11 @@ export function checkPromotion(
     case "approved":
       // The one gate a program cannot satisfy for you. Naming who approved it is the whole
       // content of the state: an approval nobody is attached to is an unsigned one.
-      return evidence.approvedBy
-        ? { ok: true, reason: `approved by ${evidence.approvedBy}` }
+      // Trimmed here rather than at each caller: an approver of "   " is truthy, and the one
+      // entry point that forgot to normalise would be the one that let an unsigned approval
+      // through. The gate owns the rule.
+      return evidence.approvedBy?.trim()
+        ? { ok: true, reason: `approved by ${evidence.approvedBy.trim()}` }
         : {
             ok: false,
             reason: "approval needs a person: say who is signing off (--by)",

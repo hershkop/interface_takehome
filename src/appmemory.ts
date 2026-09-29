@@ -14,8 +14,10 @@
  * its desktop client's; omitting tenant would let one customer's quirks steer another's
  * recording. Nothing is global — `selectMemory` matches on all three.
  *
- * **Provenance is mandatory.** An entry says where it came from. A memory of unknown origin is
- * indistinguishable from a guess, and the moment one is wrong nobody can tell which.
+ * **Provenance and ownership are mandatory.** An entry says where it came from and who is
+ * answerable for it. A memory of unknown origin is indistinguishable from a guess; one nobody
+ * owns is one nobody will retire, and stale entries never leaving is how this turns into
+ * folklore.
  *
  * **Confidence and expiry are first-class.** UI conventions go stale, and an entry that cannot
  * expire becomes folklore that outlives the screen it described.
@@ -46,6 +48,15 @@ export const MemoryEntry = z.object({
     source: z.string().min(1),
     observedAt: z.iso.datetime(),
   }),
+  /**
+   * Who is answerable for this entry — a person or a team.
+   *
+   * Separate from `provenance.source`, which says where the belief came from. Ownership says
+   * who to ask when it turns out to be wrong, and an entry nobody owns is one nobody will
+   * retire: the failure mode of a memory store is not bad entries arriving, it is stale ones
+   * never leaving.
+   */
+  owner: z.string().min(1),
   /** How much to trust it. Low-confidence entries are offered to the model as uncertain. */
   confidence: z.enum(["low", "medium", "high"]).default("medium"),
   /** After this, the entry is ignored. Absent means it does not expire — say so deliberately. */
