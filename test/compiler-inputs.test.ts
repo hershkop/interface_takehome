@@ -114,6 +114,7 @@ const entry = (over: Record<string, unknown> = {}) => ({
   fact: "Every page ships a hidden error container.",
   scope: { app: "parabank", surface: "web" as const },
   provenance: { source: "DAY0-FINDINGS", observedAt: "2026-09-24T00:00:00.000Z" },
+  owner: "platform-team",
   confidence: "high",
   ...over,
 });
@@ -210,6 +211,19 @@ describe("application memory", () => {
 
     expect(prompt).toContain("the screen is right and the note is stale");
     expect(prompt).toContain("(confidence: low)");
+  });
+
+  it("requires an owner, so a stale entry has someone to retire it", async () => {
+    const { owner: _dropped, ...ownerless } = entry();
+    await withMemory([ownerless], async (dir) => {
+      const { entries, invalid } = await loadMemory(dir);
+
+      // Provenance says where a belief came from; ownership says who to ask when it turns out
+      // to be wrong. The failure mode of a memory store is not bad entries arriving, it is
+      // stale ones never leaving.
+      expect(entries).toHaveLength(0);
+      expect(invalid[0]!.reason).toContain("owner");
+    });
   });
 
   it("ships memory that actually loads", async () => {

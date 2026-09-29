@@ -421,7 +421,13 @@
           <input data-cap="${esc(id)}" data-input="${esc(n)}" placeholder="${esc(d.description ?? "")}" />
         `).join("")}
         <div class="actions">
-          <button class="primary" data-replay="${esc(id)}">Replay</button>
+          ${
+            // No Replay for a retired capability. The server refuses it, and a button that
+            // always fails teaches an operator to distrust the buttons rather than the state.
+            c.status === "deprecated"
+              ? `<span class="count">deprecated — will not run</span>`
+              : `<button class="primary" data-replay="${esc(id)}">Replay</button>`
+          }
           <button data-edit="${esc(id)}">${open.has(id) ? "Close" : "Edit"}</button>
           <button class="danger" data-delete="${esc(id)}">Delete</button>
         </div>

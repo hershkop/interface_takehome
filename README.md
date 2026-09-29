@@ -337,6 +337,15 @@ is a decision already made.
 otherwise write `approved` onto a draft directly, since `status` is deliberately outside the
 immutability fingerprint. A ladder with a side door is not a ladder.
 
+**A change to behaviour starts the ladder again.** Every state above `draft` is a claim about a
+specific revision — that *this* artifact validates, that *this* fingerprint replayed cleanly,
+that a person read *this* and signed it. Change what the capability does and all three are
+about something that no longer exists, so the new revision returns to `draft`. A version bump
+alone is not enough: bumping while leaving `approved` in place would put new, unreviewed
+behaviour into the agent-facing catalog carrying the old revision's approval. For the same
+reason an edit cannot be combined with a promotion in one save — a gate has to be answered by
+the revision it is letting through, not the one being replaced.
+
 ### Skills: how to compile, versioned
 
 `skills/*.md` — markdown with a four-field frontmatter — is guidance the model reads while

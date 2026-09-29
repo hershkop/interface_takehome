@@ -77,6 +77,58 @@ describe("validated — does the artifact hold up on its own terms", () => {
     expect(gate.reason).toContain("click_somewhere");
   });
 
+  it("finds a coordinate wherever a locator can hide, not only in steps", () => {
+    // `collectTargets` exists so a rule about locators reaches every place one can appear.
+    // The first version of this gate walked steps only, and passed an artifact whose OUTPUT
+    // was read from a coordinate — a capability that cannot replay, marked as validated.
+    const coordinateOutput = artifact({
+      outputs: {
+        balance: {
+          type: "number",
+          source: {
+            kind: "locator",
+            target: { candidates: [{ strategy: "coordinates", x: 10, y: 20 }] },
+          },
+        },
+      },
+      steps: [
+        {
+          id: "open",
+          action: {
+            action: "click",
+            target: { candidates: [{ strategy: "role", role: "link", name: "Accounts" }] },
+          },
+        },
+      ],
+    });
+
+    const gate = checkValidated(coordinateOutput);
+    expect(gate.ok).toBe(false);
+    expect(gate.reason).toContain("outputs.balance");
+  });
+
+  it("finds a coordinate in a dismiss handler", async () => {
+    const coordinateHandler = artifact({
+      handlers: [
+        {
+          id: "close_popup",
+          match: { kind: "text", value: "Survey", visible: true },
+          scope: "global",
+          disposition: {
+            kind: "recover",
+            remedy: "dismiss",
+            maxAttempts: 1,
+            target: { candidates: [{ strategy: "coordinates", x: 5, y: 5 }] },
+          },
+        },
+      ],
+    });
+
+    const gate = checkValidated(coordinateHandler);
+    expect(gate.ok).toBe(false);
+    expect(gate.reason).toContain("close_popup");
+  });
+
   it("refuses an artifact that reports nothing at all", () => {
     // No outputs and no business outcome: a run of this cannot be told from a silent no-op.
     const silent = artifact({ outputs: {}, handlers: [] });
@@ -135,6 +187,11 @@ describe("promotion moves one step at a time", () => {
     const rehearsed = artifact({ metadata: { ...base.metadata, status: "rehearsed" } });
 
     expect(checkPromotion(rehearsed, "approved", { rehearsals: clean }).ok).toBe(false);
+    // Whitespace is not a person. Trimmed inside the gate rather than at each caller, because
+    // the one entry point that forgot would be the one that let an unsigned approval through.
+    expect(
+      checkPromotion(rehearsed, "approved", { rehearsals: clean, approvedBy: "   " }).ok,
+    ).toBe(false);
     // An approval nobody is attached to is an unsigned one.
     expect(checkPromotion(rehearsed, "approved", { rehearsals: clean, approvedBy: "sam" }).ok).toBe(
       true,
