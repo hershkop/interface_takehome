@@ -212,33 +212,7 @@
       </div>
 
       <div id="newDesktop" hidden>
-        <div class="help">
-          <h3>Desktop needs a platform helper running</h3>
-          <p>The desktop surface is implemented — <code>src/desktop/</code> drives a capability
-             over an accessibility tree the same way the browser surface drives one over a page.
-             What it needs is a <em>helper process</em> for your platform, answering seven
-             requests from macOS <code>AXUIElement</code>, Windows UI Automation or AT-SPI2.
-             None ships here.</p>
-          <p><strong>To try the path today</strong>, the reference helpers are already declared
-             in <code>helpers.json</code> — pick one on a desktop capability's card and press
-             Replay. They speak the same protocol a real helper would.</p>
-          <p>A helper is declared on the machine, never chosen from this page: the page sends a
-             name and the server looks up the command. This console has no authentication, so
-             an endpoint that ran a command from a request body would be a way for any page you
-             have open to run code here.</p>
-          <p><strong>To record against a real application</strong>, write that helper, then point
-             the same flag at it. Nothing above the process boundary changes: a desktop artifact
-             is the same document as a web one with <code>target.surface</code> set to
-             <code>desktop</code>, and its steps still read <em>click the control whose
-             accessible name is “Transfer”</em>.</p>
-          <p><strong>Grant the permission first.</strong> Accessibility access is a per-app grant
-             the person has to give by hand — System Settings on macOS — and it cannot be
-             scripted. Until it is granted the helper sees an empty tree, which looks exactly
-             like an application with no controls.</p>
-          <p class="note">Policy governs desktop runs through <code>allowedApplications</code>
-             rather than <code>allowedOrigins</code>, matched on the application's identity and
-             never on its window title.</p>
-        </div>
+        <div id="desktopRecorder"></div>
       </div>
 
       <div id="newWeb">
@@ -370,12 +344,78 @@
   const helpersFor = (c) =>
     helpers.filter((h) => h.app === undefined || h.app === c.artifact?.target?.app);
 
+  /**
+   * The Desktop panel of the New tab.
+   *
+   * Rendered from the helper list rather than written as prose, because what a machine can
+   * record against is a property of that machine. With no helper declared this is the honest
+   * answer — there is nothing to drive — and with one it is the same form the web side has.
+   */
+  function renderDesktopRecorder() {
+    const el = $("desktopRecorder");
+    if (!el) return;
+
+    if (helpers.length === 0) {
+      el.innerHTML = `
+        <div class="help">
+          <h3>No desktop helper is declared on this machine</h3>
+          <p>The desktop surface is implemented — <code>src/desktop/</code> drives a capability
+             over an accessibility tree the same way the browser surface drives one over a page.
+             What it needs is a <em>helper process</em> for your platform, answering seven
+             requests from macOS <code>AXUIElement</code>, Windows UI Automation or AT-SPI2.
+             None ships here.</p>
+          <p>Declare one in <code>helpers.json</code> — command, arguments, the policy it runs
+             under and the <code>app://</code> location it starts from — and it appears here.
+             A helper is declared on the machine, never chosen from this page: this console has
+             no authentication, so an endpoint that ran a command from a request body would be
+             a way for any page you have open to run code here.</p>
+          <p class="note">Grant accessibility access first. It is a per-app permission a person
+             gives by hand, and until it is granted a real helper sees an empty tree — which
+             looks exactly like an application with no controls.</p>
+        </div>`;
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="help">
+        <p><strong>Recording against a desktop application</strong> works the same way as the
+           web: a model drives the live application one action per turn, every action is
+           policy-checked before it runs, and what comes back is a draft. What differs is that
+           the helper decides which application — and the policy it brought decides which
+           documents inside it.</p>
+        <p class="note">The reference helpers below drive a pretend application, not a real one.
+           They exist so the path can be exercised on a machine with no accessibility
+           permission and no GUI.</p>
+      </div>
+      <label>Helper</label>
+      <select id="deskHelper">
+        ${helpers
+          .map((h) => `<option value="${esc(h.name)}">${esc(h.title)}</option>`)
+          .join("")}
+      </select>
+      <label>Goal</label>
+      <textarea id="deskGoal"
+        placeholder="Select column C and set its width to 20."></textarea>
+      <label>Capability id (lower_snake_case)</label>
+      <input id="deskCapId" placeholder="excel_set_column_width" />
+      <label>Inputs to parameterise — name=value, comma separated</label>
+      <input id="deskInputs" placeholder="column=C, width=20" />
+      <div class="actions">
+        <button class="primary" id="deskDiscoverBtn">Run discovery</button>
+      </div>
+      <p class="note">Uses a model and needs <code>ANTHROPIC_API_KEY</code> in <code>.env</code>.
+        The recorded artifact lands as a <strong>draft</strong> and starts at the bottom of the
+        lifecycle, like any other.</p>
+      <div class="err" id="deskErr"></div>`;
+  }
+
   async function loadHelpers() {
     try {
       helpers = (await (await fetch("/api/helpers")).json()).helpers ?? [];
     } catch {
       helpers = [];
     }
+    renderDesktopRecorder();
   }
 
   async function loadCapabilities() {
@@ -659,6 +699,41 @@
   });
 
   // ── Discovery ──────────────────────────────────────────────────────────────
+  /** Parses the `name=value, …` field both recorders use. */
+  function parseInputs(raw) {
+    const inputs = {};
+    for (const pair of String(raw ?? "").split(",")) {
+      const [k, ...rest] = pair.split("=");
+      if (k?.trim() && rest.length) inputs[k.trim()] = rest.join("=").trim();
+    }
+    return inputs;
+  }
+
+  // Delegated, because the desktop form is rendered after this script runs — and re-rendered
+  // whenever the helper list changes.
+  document.addEventListener("click", async (e) => {
+    if (e.target?.id !== "deskDiscoverBtn") return;
+    const err = $("deskErr");
+    e.target.disabled = true;
+    err.textContent = "";
+
+    const res = await fetch("/api/discover", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        goal: $("deskGoal").value,
+        capabilityId: $("deskCapId").value,
+        inputs: parseInputs($("deskInputs").value),
+        // A name, resolved server-side. Nothing here can name an application or a command.
+        helper: $("deskHelper").value,
+      }),
+    });
+
+    if (!res.ok) err.textContent = (await res.json()).error ?? "failed to start";
+    else showTab("runs");
+    e.target.disabled = false;
+  });
+
   $("discoverBtn").addEventListener("click", async (e) => {
     const inputs = {};
     for (const pair of $("discInputs").value.split(",")) {

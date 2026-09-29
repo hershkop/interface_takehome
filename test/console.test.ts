@@ -179,6 +179,37 @@ describe("console server", () => {
     expect((await res.json()).error).toContain("desktop surface");
   });
 
+  it("refuses a recording against a helper name it does not know", async () => {
+    // Recording needs a starting point and a surface, and both come from the named helper.
+    // Same boundary as replay: the page names one, it never describes one.
+    const url = await start();
+    const res = await fetch(`${url}/api/discover`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ goal: "x", capabilityId: "probe_thing", helper: "../../evil" }),
+    });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("not chosen from here");
+  });
+
+  it("declares a start location for every helper it offers", async () => {
+    // A replay reads its entry point from the artifact; a recording is producing one, so a
+    // helper with no baseUrl can be replayed against and not recorded against — which is a
+    // confusing half-capability to ship.
+    const url = await start();
+    const { helpers } = await (await fetch(`${url}/api/helpers`)).json();
+    for (const helper of helpers) {
+      const res = await fetch(`${url}/api/discover`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ goal: "x", capabilityId: "probe_thing", helper: helper.name }),
+      });
+      // Either it starts, or it stops for a missing API key — never for a missing baseUrl.
+      expect(await res.text()).not.toContain("declares no baseUrl");
+    }
+  });
+
   it("serves four tabs, each with the panel it controls", async () => {
     const url = await start();
     const page = await (await fetch(url)).text();
