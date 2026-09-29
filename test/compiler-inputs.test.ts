@@ -279,3 +279,35 @@ describe("replay cannot reach a compiler input", () => {
     expect([...reachable].some((f) => f.endsWith("/appmemory.ts"))).toBe(true);
   });
 });
+
+describe("what a recording run is allowed to propose", () => {
+  // Read from the module's own source: the act tool is a literal, and the point of these
+  // assertions is that the vocabulary the model can emit has not drifted from the vocabulary
+  // replay can execute. That drift is silent — the model simply never proposes the verb.
+  const source = () => readFile("src/discovery.ts", "utf8");
+
+  it("offers every action replay can perform", async () => {
+    const text = await source();
+    for (const action of ["navigate", "click", "fill", "select", "wait", "extract", "assert", "press"]) {
+      expect(text, action).toContain(`"${action}"`);
+    }
+    // `press` is the one that was missing: it existed in the schema, both surfaces and replay
+    // while the compiler could not emit it, so the Excel flow was replayable and unrecordable.
+    expect(text).toMatch(/enum: \[[^\]]*"press"/);
+  });
+
+  it("offers the desktop locator and the right mouse button", async () => {
+    const text = await source();
+    expect(text).toContain("cell: {");
+    expect(text).toContain("button: {");
+    expect(text).toContain('enum: ["left", "right", null]');
+  });
+
+  it("frames the run by surface rather than assuming a browser", async () => {
+    const text = await source();
+    // Telling a model driving a spreadsheet that it is operating a web page is not a
+    // stylistic mismatch — it is an instruction to reach for selectors that never resolve.
+    expect(text).toContain("CSS selectors mean nothing here");
+    expect(text).toContain("address a cell by its reference");
+  });
+});

@@ -346,6 +346,22 @@ behaviour into the agent-facing catalog carrying the old revision's approval. Fo
 reason an edit cannot be combined with a promotion in one save — a gate has to be answered by
 the revision it is letting through, not the one being replaced.
 
+### The compiler can emit everything replay can execute
+
+A recording run's action vocabulary is the tool schema in `src/discovery.ts`, and it has to
+match the one `replay.ts` implements. When it does not, nothing errors — the model simply never
+proposes the missing verb, and a flow that needs it is quietly unrecordable. That is how the
+Excel capability came to be replayable but not recordable: `press`, the right mouse button and
+the `cell` locator existed in the schema, both surfaces and replay, while the compiler could
+not emit them. `test/compiler-inputs.test.ts` now asserts the two vocabularies agree.
+
+The framing is scoped by surface too. Telling a model driving a spreadsheet that it is operating
+a web page is not a stylistic mismatch — it is an instruction to reach for CSS selectors that
+will never resolve. A desktop run is told there is no page and no DOM, and gets the three notes
+that only matter there: fields that hold a value until a key commits it, operations that live
+behind the right mouse button, and cells addressed by reference rather than by the value they
+happen to hold.
+
 ### Skills: how to compile, versioned
 
 `skills/*.md` — markdown with a four-field frontmatter — is guidance the model reads while

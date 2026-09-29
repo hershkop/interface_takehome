@@ -109,26 +109,57 @@ export type DiscoveryResult =
 const ACT_TOOL: Anthropic.Tool = {
   name: "act",
   description:
-    "Perform one action on the page. Prefer identifying controls by their accessible role and " +
+    "Perform one action on the current screen. Prefer identifying controls by their accessible role and " +
     "name, exactly as they appear in the snapshot — that is what makes the recording durable. " +
-    "Use a CSS selector only when the control has no accessible name.",
+    "Use a CSS selector only when the control has no accessible name, and never on a desktop surface.",
   input_schema: {
     type: "object",
     properties: {
       action: {
         type: "string",
-        enum: ["navigate", "click", "fill", "select", "wait", "extract", "assert"],
+        enum: ["navigate", "click", "fill", "select", "wait", "extract", "assert", "press"],
       },
       rationale: { type: "string", description: "Why this action, in one sentence." },
       role: { type: ["string", "null"], description: "ARIA role of the target control." },
       name: { type: ["string", "null"], description: "Accessible name of the target control." },
       css: { type: ["string", "null"], description: "CSS selector fallback." },
+      cell: {
+        type: ["string", "null"],
+        description:
+          "Grid cell reference such as C4, for spreadsheet-like surfaces. Use this rather than " +
+          "the cell's name: a cell's accessible name is its value, and it changes the moment " +
+          "anything writes to it.",
+      },
+      button: {
+        type: ["string", "null"],
+        enum: ["left", "right", null],
+        description: "Mouse button for click. Right opens context menus. Defaults to left.",
+      },
+      keys: {
+        type: ["string", "null"],
+        description:
+          "Key or chord for press, such as Enter, Escape or Control+Shift+ArrowDown. Some " +
+          "controls hold what you typed until a key commits it.",
+      },
       value: { type: ["string", "null"], description: "Value for fill/select." },
       url: { type: ["string", "null"], description: "Absolute URL for navigate." },
       text: { type: ["string", "null"], description: "Visible text for wait/assert." },
       as: { type: ["string", "null"], description: "Variable name for extract." },
     },
-    required: ["action", "rationale", "role", "name", "css", "value", "url", "text", "as"],
+    required: [
+      "action",
+      "rationale",
+      "role",
+      "name",
+      "css",
+      "cell",
+      "button",
+      "keys",
+      "value",
+      "url",
+      "text",
+      "as",
+    ],
     additionalProperties: false,
   },
   strict: true,
@@ -191,9 +222,42 @@ const STUCK_TOOL: Anthropic.Tool = {
   strict: true,
 };
 
-const SYSTEM = `You are operating a real back-office banking application through its user
-interface, the way a human operator would. You are exploring it ONCE so the flow can be recorded
-and replayed later without you.
+/**
+ * The framing, per surface.
+ *
+ * Split because the rest of the prompt is technology-neutral and this part cannot be: telling a
+ * model driving a spreadsheet that it is operating a web page is not a stylistic mismatch, it
+ * is an instruction to reach for CSS selectors that will never resolve. The skill library is
+ * already scoped this way; the prompt that frames it was not.
+ */
+const OPENING: Record<SurfaceKind, string> = {
+  web: `You are operating a real web application through its user interface, the way a human
+operator would.`,
+  desktop: `You are operating a real desktop application through its user interface, the way a
+human operator would. There is no page, no URL and no DOM: you are in an application window,
+and CSS selectors mean nothing here.`,
+};
+
+/** Verbs that only exist, or only matter, on one kind of surface. */
+const SURFACE_NOTES: Record<SurfaceKind, string> = {
+  web: "",
+  desktop: `
+Desktop-specific things worth knowing:
+
+- Some controls hold what you typed until a key commits it. A field that takes a range or an
+  address is usually one of them: fill it, then \`press\` Enter. A flow that fills and moves on
+  looks correct and does nothing.
+- Real operations often live behind the right mouse button. If you cannot find a command in a
+  menu bar or toolbar, try \`click\` with button "right" on the thing it would act on.
+- In a grid, address a cell by its reference — \`cell: "C4"\` — never by its name. A cell's
+  accessible name is its current value, so a recording that targets the name breaks the moment
+  anything writes to it.
+- A window title is not a location. It changes when the application saves or renames, and
+  nothing durable should be built on it.`,
+};
+
+const SYSTEM_BODY = `You are exploring this application ONCE so the flow can be recorded and
+replayed later without you.
 
 You see each screen as an accessibility snapshot: roles and accessible names, the same
 representation a screen reader produces. Work from it.
@@ -214,6 +278,13 @@ Rules that matter for what gets recorded:
   only proves it for one account.
 - If you are blocked, call give_up and say why. That is a legitimate outcome that brings in a
   human — it is not a failure to conceal.`;
+
+/** The whole system prompt for one recording run. */
+function systemPrompt(surface: SurfaceKind): string {
+  return [OPENING[surface], SYSTEM_BODY, SURFACE_NOTES[surface]]
+    .filter((part) => part.trim() !== "")
+    .join("\n\n");
+}
 
 // ─── The loop ──────────────────────────────────────────────────────────────────
 
@@ -271,7 +342,7 @@ export async function discover(request: DiscoveryRequest): Promise<DiscoveryResu
 
   const renderedSkills = renderSkills(selectedSkills);
   const renderedMemory = renderMemory(selectedMemory);
-  const system = [SYSTEM, renderedSkills.prompt, renderedMemory.prompt]
+  const system = [systemPrompt(surfaceKind), renderedSkills.prompt, renderedMemory.prompt]
     .filter((section) => section !== "")
     .join("\n\n");
 
@@ -545,6 +616,9 @@ interface ActInput {
   role: string | null;
   name: string | null;
   css: string | null;
+  cell: string | null;
+  button: "left" | "right" | null;
+  keys: string | null;
   value: string | null;
   url: string | null;
   text: string | null;
@@ -571,14 +645,20 @@ interface RecordedStep {
  */
 function buildTarget(proposal: ActInput): Target | { error: string } {
   const candidates: LocatorCandidate[] = [];
+  // First, because it is the most durable thing a grid can offer: a cell's name is its value,
+  // and a recording that targeted the name would break the next time anything wrote to it.
+  if (proposal.cell) candidates.push({ strategy: "cell", ref: proposal.cell });
   if (proposal.role && proposal.name) {
     candidates.push({ strategy: "role", role: proposal.role, name: proposal.name, exact: false });
   }
   if (proposal.css) candidates.push({ strategy: "css", value: proposal.css });
   if (candidates.length === 0) {
-    return { error: "give either an accessible role and name, or a CSS selector." };
+    return { error: "give an accessible role and name, a cell reference, or a CSS selector." };
   }
-  return { candidates, ...(proposal.name ? { description: proposal.name } : {}) };
+  return {
+    candidates,
+    ...(proposal.name ? { description: proposal.name } : proposal.cell ? { description: `cell ${proposal.cell}` } : {}),
+  };
 }
 
 type BuiltAction =
@@ -587,9 +667,14 @@ type BuiltAction =
 
 function buildAction(proposal: ActInput, request: DiscoveryRequest): BuiltAction {
   const needsTarget = ["click", "fill", "select", "extract"].includes(proposal.action);
+  // `press` is the one action whose target is optional: keys with no target go to whatever
+  // has focus, which is how a selection made by an earlier step is acted on.
+  const mayHaveTarget =
+    needsTarget ||
+    (proposal.action === "press" && Boolean(proposal.role ?? proposal.cell ?? proposal.css));
   let target: Target | undefined;
 
-  if (needsTarget) {
+  if (mayHaveTarget) {
     const built = buildTarget(proposal);
     if ("error" in built) return { ok: false, error: built.error };
     target = built;
@@ -605,7 +690,18 @@ function buildAction(proposal: ActInput, request: DiscoveryRequest): BuiltAction
     }
     case "click":
       raw.target = target;
+      // Carried through, because a right-click reaches operations that have no other route.
+      // Dropped here, a model asking for a context menu would silently get a left-click.
+      if (proposal.button) raw.button = proposal.button;
       break;
+    case "press": {
+      if (!proposal.keys) return { ok: false, error: "press needs keys, such as Enter." };
+      raw.keys = proposal.keys;
+      // Optional: keys with no target go wherever focus already is, which is how a grid is
+      // driven after a selection.
+      if (target) raw.target = target;
+      break;
+    }
     case "fill":
     case "select": {
       if (proposal.value === null) return { ok: false, error: `${proposal.action} needs a value.` };
