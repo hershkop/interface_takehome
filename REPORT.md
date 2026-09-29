@@ -1,538 +1,449 @@
-# Design write-up
+# Design report
 
-A system that lets an LLM figure out a UI flow **once**, records what it learned as a typed
-capability, and then replays that capability deterministically — with no model in the decision
-loop — so an AI agent can invoke it by name, cheaply and repeatably.
+This system lets an LLM learn a UI workflow once, records the result as a typed capability,
+and replays that capability deterministically with no model in the runtime decision loop.
 
-The whole thesis, demonstrated end to end:
+The model is a compiler, not the runtime. Discovery turns a goal, authoring guidance,
+application memory, and live observations into a versioned JSON artifact. Replay interprets
+only that artifact and returns one of four typed outcomes: success, an expected business
+outcome, escalation to a person, or failure.
 
+The core claim is demonstrated end to end:
+
+```text
+discover account 12678  →  recorded capability, model calls > 0
+replay account 12345    →  balance -2300, account type CHECKING, model calls = 0
 ```
-$ npm run cli -- discover --goal "Log in, then look up account 12678 and read its balance
-                                  and account type" --capability lookup_balance_discovered ...
-  RECORDED  lookup_balance_discovered v1.0.0    steps: 8    model calls: 10
 
-$ npm run cli -- replay capabilities/lookup_balance_discovered.v1.json --input accountId=12345
-  SUCCESS   balance = -2300   accountType = "CHECKING"   model calls: 0
-```
-
-The model saw account `12678`. The recorded capability works for `12345`, `12456`, `13122` —
-accounts it never visited — because the run was parameterised as it was recorded. Evidence for
-both is in `/evidence/examples/`.
-
----
+The model never saw account `12345`. The same capability works because account identifiers are
+inputs rather than recorded constants. Committed run evidence is under
+[`evidence/examples/`](evidence/examples).
 
 ## 1. Architecture
 
-A single process, five layers, each depending only on the one below it.
-
+```text
+skills + application memory + goal + observation
+                     │
+                     ▼
+              discovery compiler
+                     │
+                     ▼
+           typed capability artifact
+                     │
+        validate → rehearse → approve
+                     │
+          ┌──────────┴──────────┐
+          ▼                     ▼
+   agent-facing catalog   deterministic replay
+                                │
+                    ownership + policy wrappers
+                                │
+                   ┌────────────┴────────────┐
+                   ▼                         ▼
+          Playwright web surface     desktop helper surface
+                   │                         │
+                   └────────────┬────────────┘
+                                ▼
+                 typed result + run evidence
+                                │
+                         audit + console
 ```
-  cli.ts ──────────── discover | replay | validate | capabilities | invoke
-     │
-  discovery.ts        observe → decide → act, once, to produce an artifact
-  replay.ts           the production path: interprets an artifact, no model
-  catalog.ts          artifacts as agent-callable tools
-     │
-  handoff.ts          who holds the session  ─┐
-  safety.ts           what is permitted       ├─ wrappers around the surface
-     │                                        ─┘
-  surface.ts ──────── Surface port + PlaywrightSurface
-     │
-  schema.ts ───────── every typed contract
-```
 
-**Discovery and replay share one action vocabulary and one surface.** Discovery decides *which*
-action; replay only interprets actions already chosen. That is what makes a recording faithful:
-there is no second implementation for the model's actions to diverge from.
+The TypeScript orchestration is deliberately compact. It uses filesystem persistence instead
+of a database or queue, starts Chromium for web runs, and starts a helper child process for
+desktop runs. That is enough to make the architectural boundaries executable without adding
+scaling infrastructure that would not change them.
 
-**Enforcement lives in wrappers, not in the loop.** `GuardedSurface` (policy) and `OwnedSurface`
-(ownership) wrap the surface, and everything that drives the browser goes through them. This was
-a correction, not the first design: the checks originally lived in the replay loop, and a review
-found three things routing around it — a `dismiss` remedy, a re-authentication callback, and
-output collection. Each was a real action against a real application that passed no check. The
-loop is not the only thing that drives the browser, so the guard cannot live there.
+The important boundaries are:
 
-Ownership wraps *outside* policy: if a person is driving, no question about what policy would
-have permitted is even asked.
+- `src/discovery.ts` observes and chooses actions while compiling a capability.
+- `src/replay.ts` interprets an existing capability without importing any model client.
+- `src/lifecycle.ts` defines what evidence is required before a capability becomes callable.
+- `src/catalog.ts` turns approved artifacts into typed agent tools.
+- `src/handoff.ts` controls whether automation or a person owns the session.
+- `src/safety.ts` decides what the current run is permitted to do.
+- `src/surface.ts` and `src/desktop/` implement the shared intent-level surface contract.
+- `src/evidence.ts` records runs; `src/audit.ts` reads those records back as a ledger.
+- `src/console/` provides the local review, run, recording, handoff, and audit UI.
 
-**Trade-offs.** One process, filesystem persistence, no queue or database. The brief says
-building scaling infrastructure is not rewarded, and none of it would change a boundary here —
-`InterventionChannel` already has one implementation and would take a queue consumer as another
-without touching another file.
+Discovery and replay share the same action schema and surface interface. Discovery chooses an
+action; replay only interprets an action already present in an artifact. A test compares the
+compiler's tool vocabulary with replay's action union so a replayable verb cannot quietly
+become unrecordable.
 
-Playwright over a CUA/agent SDK: this system's value is the *artifact*, and an agent SDK would
-own the loop that produces it. How each proposed action is validated, policy-checked, risk-gated
-and then recorded as a durable locator is exactly the part worth writing by hand.
+Policy and ownership are wrappers around the surface rather than checks embedded only in the
+step loop. That matters because steps are not the only code that can act: dismiss handlers,
+re-authentication, and output collection also touch the application. `OwnedSurface` wraps
+outside `GuardedSurface`, so when a person owns the session automation cannot act even if policy
+would otherwise allow the action.
 
-Claude Opus 5 with adaptive thinking, tool use, and `disable_parallel_tool_use`. One action per
-turn, because the loop observes between actions — a batch would have the model choosing its
-second move from a page it has not seen, which is the guesswork this design exists to remove.
+Playwright was chosen over an agent SDK because the valuable output is the artifact. The system
+needs to own how proposed actions are validated, risk-gated, converted to durable locators, and
+recorded. An agent SDK that owns the loop would hide the part under evaluation.
 
----
+Discovery currently uses Claude Opus 5 with adaptive thinking and one tool action per turn.
+Parallel tool use is disabled because the model must observe the result of one action before it
+chooses the next.
 
-## 2. Artifact schema
+## 2. Capability artifact and compiler
 
-A capability is declarative JSON validated by a versioned Zod schema (`src/schema.ts`).
+A capability is declarative JSON validated by the versioned Zod schema in `src/schema.ts`.
 
 ```ts
 {
-  schemaVersion, capabilityId, version, derivedFrom?,   // identity and lineage
-  metadata: { name, description, status, risk, recordedAt, recordedBy, model? },
-  target:   { app, appFingerprint?, baseUrl },
-  inputs:   Record<name, InputDefinition>,              // the call contract
-  outputs:  Record<name, OutputDefinition>,             // what the caller gets
-  steps:    ArtifactStep[],                             // ordered, linear
-  handlers: Handler[],                                  // the outcome model
-  checkpoint: Condition                                 // proof it worked
+  schemaVersion,
+  capabilityId,
+  version,
+  derivedFrom?,
+  metadata: {
+    name,
+    description,
+    status,
+    risk,
+    recordedAt,
+    recordedBy,
+    model?,
+    compiledWith?,
+    notes?
+  },
+  target: { app, surface, baseUrl, appFingerprint? },
+  inputs: Record<string, InputDefinition>,
+  outputs: Record<string, OutputDefinition>,
+  steps: ArtifactStep[],
+  handlers: Handler[],
+  checkpoint: Condition
 }
 ```
 
-### Why it is shaped this way
+### Locators and actions
 
-**Targets are ordered candidate lists, not selectors.** Replay walks them and requires *exactly
-one visible match*; zero and ambiguous are both refusals. Three identical `Delete` buttons is
-the case that matters — picking the first acts on the wrong record and reports success.
+A target is an ordered list of locator candidates, not one selector. Resolution walks the list
+and accepts the first candidate that matches exactly one visible element. Zero matches stop the
+run; multiple visible matches are ambiguous and also stop it. Choosing the first of several
+`Delete` buttons would be a successful action against the wrong record.
 
-The recommended order is accessible role+name → label → visible text → stable id → structural
-CSS → coordinates, and discovery emits candidates that way. Be clear about what enforces it:
-**the resolver walks the chain in the order the artifact gives**, so the ranking is a convention
-followed by the recorder and by review, not something the engine imposes. A hand-authored
-artifact that lists CSS first will get CSS.
+Discovery emits candidates in this preference order:
 
-One targeting rule *is* enforced: a coordinate target anywhere in an artifact — a step, an
-output locator, a dismiss handler — blocks `approved` status, checked by schema refinement over
-every target location.
-
-**Handlers make the error taxonomy data, not engine branching.** Each pairs a match condition
-with one of three dispositions:
-
-```jsonc
-{ "id": "account_not_found",
-  "match": { "kind": "text", "value": "Could not find account" },
-  "disposition": { "kind": "business_outcome", "outcome": "account_not_found" } }
+```text
+accessible role and name → label → visible text → stable id → structural CSS
 ```
 
-Three payoffs: a reviewer can see what a capability treats as *normal but not success*;
-recovery can never be open-ended (three named remedies, capped attempts); and a tenant can add
-a handler for a branded interstitial as an override without forking the flow.
+The artifact owns the order at replay time. A hand-authored artifact can put CSS first, so the
+ranking is an authoring convention enforced by discovery and review rather than reordered by
+the runtime.
 
-**Business outcomes are open strings; engine failures are a closed enum.** The asymmetry is
-deliberate. Outcomes are app-specific and the caller switches on them. Failures are a set the
-caller must handle exhaustively, so an artifact may not declare one the result contract cannot
-carry.
+Coordinates are a discovery-only escape hatch. A model may click a point and use the returned
+element metadata to derive a durable locator, but replay never resolves a coordinate candidate.
+The validation gate scans steps, outputs, and dismiss handlers so coordinates cannot hide in a
+less obvious target.
 
-**Outputs declare how they are obtained**, not just their type — a locator or a variable captured
-by an earlier `extract`, plus a coercion and a missing-value policy. Otherwise "typed outputs"
-is a comment. `currency` exists because ParaBank renders `-$100.00`, and `parseFloat` of that
-is `NaN`.
+The shared action vocabulary is `navigate`, `click`, `fill`, `select`, `press`, `wait`,
+`extract`, and `assert`. `press`, right-clicks, and cell references were added after the Excel
+example exposed real gaps: filling a value is not the same as committing it with Enter, context
+menus need a right mouse button, and a spreadsheet cell needs an address that survives a value
+change.
 
-**Risk is mandatory.** `metadata.risk` has no default. A truncated recorder output must not be
-able to execute unattended *by omission*; it fails validation instead. Defaulting to
-`approval_required` would be the other fail-closed choice, but it would gate every read-only
-lookup and defeat unattended replay.
+### Outputs, handlers, and risk
 
-**Four identity fields** — `capabilityId`, `version`, `derivedFrom`, `appFingerprint` — cost
-nothing now and are expensive to retrofit. They are the whole cross-tenant story (§4).
+Outputs declare both their type and how to obtain them: from a locator or an extracted variable,
+with coercion and missing-value behavior. `currency` coercion exists because ParaBank renders
+negative balances as `-$100.00`, which a naive `parseFloat` cannot read.
 
-### A parameter can hide in three places
+Handlers keep application-specific branching in data. Each handler matches a declared condition
+and produces one of three dispositions:
 
-Found by replaying a capability the model had just discovered, not by reading code:
+- an expected business outcome such as `account_not_found`;
+- a bounded recovery using `dismiss`, `retry_step`, or `reauthenticate`; or
+- a declared hard failure from the engine's closed error enum.
 
-| where | example |
+Business outcomes are open strings because applications define them. Engine failures are a
+closed set so callers can handle them exhaustively.
+
+Risk is mandatory at capability level and may be overridden per step. A truncated or incomplete
+artifact cannot execute unattended because a risk field was omitted. `blocked` is absolute;
+other risk classes are interpreted by the run's policy.
+
+### Parameters can hide in three places
+
+The first discovered capability exposed a subtle compiler problem. An input can appear in:
+
+| Location | Example |
 |---|---|
-| an action value | `fill` → `{{inputs.amount}}` |
-| a **locator name** | `click role=link name={{inputs.accountId}}` |
-| a **condition** | `wait for text {{inputs.accountId}}` |
+| Action value | `fill` with `{{inputs.amount}}` |
+| Locator | link named `{{inputs.accountId}}` |
+| Condition | wait for text `{{inputs.accountId}}` |
 
-The discovered flow reached an account by clicking a link whose accessible name *is* the account
-number. Parameterising only values left a "reusable" capability wired to one account. Both
-discovery and replay now handle all three.
+The learned ParaBank flow reaches an account by clicking a link whose accessible name is the
+account number. Parameterizing only action values produced an artifact that looked reusable but
+was still wired to the discovery account. Template resolution now covers all three locations.
 
----
+### Skills and application memory are compiler inputs
 
-## 3. Determinism & error handling
+Versioned Markdown skills provide reusable recording guidance. Their scopes are `generic`,
+`surface:web`, `surface:desktop`, or `app:<name>`, ordered from broadest to most specific in the
+prompt. Surface scoping is a correctness boundary: telling a desktop recorder to prefer CSS
+selectors is actively harmful.
 
-### What makes replay deterministic
+Application memory stores terminology, aliases, dialogs, and observed failure modes. Each entry
+is scoped by application, surface, and optionally tenant; carries provenance and an owner; and
+can express confidence and expiry. Entries containing configured secret values are refused
+rather than scrubbed because the source file itself is committed.
 
-| | |
+The selected skill and memory versions are written to `metadata.compiledWith`. Neither module is
+reachable from replay's import graph, and a test checks that boundary. Guidance may change how
+the next artifact is compiled, but it cannot change how an already approved artifact runs.
+
+## 3. Trust lifecycle and agent catalog
+
+The lifecycle separates three claims that a single `approved` flag would otherwise blur:
+
+| State | Claim and evidence |
 |---|---|
-| **No model** | Nothing in `replay.ts` can call one. Every run records `modelCalls`; a test asserts `0` across the success and business-outcome paths, and the count is in every committed replay result |
-| **Declared branches only** | Steps in order, handlers with fixed dispositions, one checkpoint |
-| **Refusal over guessing** | Exactly one visible match, or the run stops |
-| **Waits, never sleeps** | Every wait is on an observable condition with a bounded timeout |
-| **Verified, not assumed** | Postconditions prove a step did something; the checkpoint proves the run reached the state it claims |
+| `draft` | Recorded, but not trusted yet |
+| `validated` | Schema-valid, durable locators, checkpoint, and a reportable result |
+| `rehearsed` | Three clean replays of this exact executable fingerprint, with no failures |
+| `approved` | A named person decided the capability should be callable |
+| `deprecated` | Retired and refused; reachable from any state |
 
-### The result contract has four statuses
+Promotion moves one step at a time. Both the CLI and console call the same gate functions, so
+the raw JSON editor is not a side door around lifecycle checks. Only `approved` capabilities
+appear in the agent-facing catalog. A `rehearsed` capability has proved it works, but nobody has
+yet decided that an agent should be allowed to call it.
+
+Rehearsals are keyed by a canonical fingerprint of executable artifact content, not by
+`capabilityId` or a version string supplied by an author. Editing behavior therefore resets the
+evidence. The fingerprint excludes review notes and lifecycle status because neither changes
+runtime behavior.
+
+The console prevents an approved revision from changing in place. Behavioral edits require a
+new version and a return to `draft`; notes may change without a version bump. The catalog rejects
+multiple files with the same `capabilityId` rather than letting filename order decide which
+revision runs. Superseded revisions remain in git history.
+
+Agent tool definitions are generated from artifact inputs and outputs. The advertised schema and
+the schema enforced during invocation therefore share one source. `invoke` refuses non-approved
+capabilities unless a caller explicitly opts into a draft, and it never permits a deprecated
+capability.
+
+## 4. Deterministic replay and error handling
+
+| Property | Mechanism |
+|---|---|
+| No model | Replay has no model client and records `modelCalls: 0` |
+| Declared control flow | Ordered steps, fixed handlers, and a final checkpoint |
+| Refusal over guessing | A target must resolve to exactly one visible element |
+| Observable waits | UI readiness and postconditions are polled with bounded timeouts |
+| Verified progress | Postconditions verify steps and the checkpoint verifies the result |
+
+Replay returns a discriminated union:
 
 ```ts
-| { status: "success";          outputs, evidence }
-| { status: "business_outcome"; outcome, detail, evidence }
-| { status: "escalated";        intervention, evidence }
-| { status: "failure";          error, evidence }
+| { status: "success"; outputs; evidence }
+| { status: "business_outcome"; outcome; detail; evidence }
+| { status: "escalated"; intervention; evidence }
+| { status: "failure"; error; evidence }
 ```
 
-`escalated` exists because an unattended caller hitting an approval gate has no honest home in
-success/outcome/failure. Making it part of the contract is what keeps control transfer a
-first-class concept rather than a CLI affordance.
+`escalated` is separate because an unattended caller reaching a human gate has neither
+succeeded nor failed. CLI exit codes are `0` for success or business outcome, `2` for escalation,
+and `1` for failure.
 
-Exit codes let an agent branch without parsing output: `0` success **or** business outcome, `2`
-escalated, `1` failure. *A business outcome is not an error* — "no such account" is the answer
-the caller asked for.
+Handlers are evaluated before and after each step. A condition that appears while the previous
+step settles must be handled before the engine acts into the wrong screen. Recovery attempts are
+bounded across the whole run.
 
-### Handling runtime conditions
+Nothing that may already have caused a side effect is repeated. A pre-step recovery can retry
+the step because it has not run. After a successful step, replay continues forward. If a
+postcondition does not become true, only `navigate`, `wait`, `extract`, and `assert` may be
+retried. A successful `click`, `fill`, `select`, or `press` stops with
+expected-versus-observed context instead of risking a duplicate transfer or submission.
 
-The brief's three categories, and how each is detected:
+Every execution writes evidence under `evidence/`. The audit reader reconstructs outcomes,
+model calls, tokens, duration, and cost from those files. Costs are calculated at read time from
+recorded token usage so a price-table change does not rewrite history. Unknown usage stays
+unknown rather than being reported as zero, and committed copies of example runs are displayed
+but excluded from totals.
 
-- **Expected business outcomes** — a handler matches and returns `business_outcome` with detail.
-  `account_not_found` fires on ParaBank's own *"Could not find account # 99999"*.
-- **Recoverable conditions** — a handler applies one of three remedies (`dismiss`, `retry_step`,
-  `reauthenticate`) with a per-handler cap across the whole run, so a remedy that keeps matching
-  cannot loop by advancing one step at a time.
-- **Hard failures** — a closed error enum with the failing step, what was expected, what was
-  observed, attempt count, and a redacted ARIA snapshot.
+## 5. Web, desktop, and tenant variation
 
-Handlers are evaluated **before and after every step**. An interstitial that appeared while the
-previous step settled has to be dealt with before we act into it, not discovered afterwards as a
-confusing timeout.
+### One intent-level surface contract
 
-### Nothing that already succeeded is ever re-run
+Nothing in the artifact or replay loop is a Playwright type. `Surface` expresses actions such as
+"click the uniquely named control" and observations as an accessibility tree. The interface is
+implemented by both `PlaywrightSurface` and `DesktopSurface`, and a non-browser state-machine
+test exercises replay through the same port.
 
-Re-executing a click that already submitted a transfer submits a second one. Two paths could do
-that and both are closed:
+`target.surface` is declared as `web` or `desktop`; it is not inferred from `baseUrl`. The launch
+path compares the artifact with the supplied surface before taking any action, so a desktop
+artifact handed to a browser reports a surface mismatch instead of a misleading locator failure.
 
-- **Recovery.** A handler matching *before* a step retries it. A handler matching *after* a step
-  that succeeded continues to the next step.
-- **Postconditions.** Polled, so a slow confirmation is waited for. If it still does not hold,
-  only actions repeatable without side effect (`navigate`, `wait`, `extract`, `assert`) may be
-  retried; a `click`, `fill` or `select` that already succeeded stops the run and reports
-  expected-vs-observed.
+ARIA snapshots were chosen over DOM dumps because role and accessible name are meaningful for a
+modern web page, a legacy JSP application, and a native accessibility tree. The ParaBank page is
+roughly 4.5 KB in that representation, and the model naturally proposes role-and-name locators
+from what it sees.
 
-Both are pinned by fixtures that count submissions. I fixed the first and left the second — a
-review caught it.
+### Desktop helper boundary
 
-### On UI drift
+`DesktopSurface` talks newline-delimited JSON over stdio to a helper process. The helper focuses
+an application, observes its accessibility tree, resolves locator queries, performs mutations,
+and captures masked screenshots. It returns every match rather than choosing one, and mutations
+use opaque handles issued by resolution so a changing tree cannot be silently re-queried between
+uniqueness checking and action.
 
-Secondary, per the brief. The candidate chain degrades gracefully: ParaBank's login fields carry
-no accessible name at all (their labels are sibling `<p>` elements), so `role=textbox` matches
-nothing and resolution falls through to CSS. The role candidate stays in the artifact
-deliberately — it documents intent and would resolve on a better-behaved build of the same
-vendor product. `appFingerprint` plus replay history is the drift signal; acting on it is not
-built.
+Every mutating response includes the resulting window. This prevents the safety layer from
+being one action behind if a click switches applications. Policy checks application identity and,
+for document-oriented tools such as Excel, the document path rather than the mutable window
+title.
 
----
+The repository includes executable banking and Excel reference helpers. They prove the transport,
+resolution, action vocabulary, evidence, policy, and replay contract through real child-process
+framing, but they drive hand-written trees rather than a real application. A production helper
+still needs to bind the protocol to macOS AXUIElement, Windows UI Automation, or AT-SPI2.
 
-## 4. Heterogeneity & multi-tenant
+### Tenant variation
 
-### Surface abstraction
+Runtime inputs, secrets, base-URL overrides, and policy let one artifact operate against
+different environments without baking credentials or tenant URLs into its steps. Identity and
+lineage fields (`capabilityId`, `version`, `derivedFrom`, and `appFingerprint`) provide the shape
+needed for vendor-level artifacts and tenant-specific revisions.
 
-No type above `surface.ts` is a browser type. `Surface` is fourteen members of intent —
-*click the control whose accessible name is "Transfer"*, *is this text visible* — and `replay()`
-takes a `SurfaceFactory`, so nothing in the step loop, the handlers, policy, the ownership lock
-or evidence knows what it got back. The only remaining mention of Playwright outside
-`surface.ts` is the one line that names the **default** factory.
+The tenant registry, credential store, override resolver, and automated fingerprint drift
+response are not implemented. Candidate chains absorb renamed controls; they do not absorb a
+different workflow with an extra confirmation screen. That case needs a new recording linked by
+`derivedFrom`.
 
-That is now checked rather than claimed: `test/surface-port.test.ts` replays a capability
-through a hand-rolled state machine with no browser, no DOM and no network, and asserts the same
-result contract. If that test ever needs a change to `replay.ts`, the seam has regressed.
+## 6. Escalation and control transfer
 
-Two things the port had to grow to make it true, both found by writing that test:
+The system can become stuck in three distinct ways:
 
-- **Screenshots return bytes.** Evidence used to take a Playwright `Page`. Capture — and with
-  it masking — moved into the surface, which is where the knowledge of *which regions are
-  sensitive* actually lives.
-- **A surface declares `locationKind`.** The origin allowlist is defined in http(s) origins, so
-  it can only police a surface whose locations are URLs. A desktop window has a name, not an
-  origin, and policing it with a URL allowlist rejected every location it reported. The surface
-  declares which it is rather than the guard sniffing the string — a surface that quietly
-  returned something unparseable would silently disable a safety check instead of announcing it
-  needs a different one.
+- During discovery, the model can call `give_up` instead of thrashing or bypassing a guard.
+- During replay, a step or handler can require a person.
+- Policy can require approval for the step's risk class.
 
-Observation is a Playwright **ARIA snapshot** — role and accessible name — chosen because it is
-the one representation a modern web app, a legacy frameset, and a native desktop app can all
-produce. It is visibility-aware by construction and about 4.5KB on ParaBank's overview versus a
-full DOM.
+An intervention request contains the capability, goal, step, current location, visible alerts,
+and a screenshot captured before handoff. `OwnedSurface` then transfers ownership to the person
+and refuses automation mutations until the session has been observed and returned.
 
-That choice paid off in the discovery run: reading roles and names, the model proposed
-`role=button name="Log In"` and `role=link name="12678"` on its own, and reached for CSS only on
-the two fields that genuinely have no accessible name — exactly the preference order the schema
-wants.
+The response is deliberately three-valued:
 
-**A desktop adapter** implements the same port over OS accessibility APIs. The
-observation it produces is the same shape, and locator candidates are a discriminated union, so
-a surface-specific strategy is additive rather than a schema change. A *legacy* web app needs no
-adapter at all — ParaBank is server-rendered JSP with framesets' worth of nested tables and no
-test IDs, and is the surface this was built against.
-
-The honest limit: a surface with no accessibility tree at all (canvas, custom-rendered
-terminals) would need screenshot-plus-coordinates. `Surface.clickAt()` exists for that and
-returns what was under the cursor so a durable locator can be derived — but replay refuses
-coordinate candidates outright, so such a flow stays a draft needing human review.
-
-### Multi-tenant reuse
-
-`capabilityId` + `version` define a vendor/app-level capability. `baseUrl`, credentials, and
-allowed routes resolve from tenant configuration **at invoke time** — `--base-url` is that
-resolution point, and the recorded value is only a default.
-
-A tenant needing divergence ships an **override**: extra handlers or extra locator candidates
-keyed by step id, with `derivedFrom` recording lineage — not a copied artifact. Because handlers
-and candidate chains are both lists, an override is additive.
-
-Drift detection is `appFingerprint` plus replay history: a replay against a different
-fingerprint is worth flagging before it silently misbehaves. A tenant-specific fallback is never
-silently promoted into the base artifact.
-
-**Not built:** the override resolver, a capability registry, per-tenant credential storage. The
-schema fields those need are present; the machinery is not, and building it would be the
-premature scaling infrastructure the brief warns against.
-
-One thing this design does *not* solve: a tenant whose vendor build differs enough that the flow
-itself changes — an extra confirmation screen, a different navigation path. Candidate chains
-absorb relabelled controls, not restructured flows. That case needs a re-record against that
-tenant, with `derivedFrom` linking it to the base.
-
----
-
-## 5. Escalation & handoff
-
-### Detecting "stuck"
-
-Three ways, and they are genuinely different:
-
-- **Discovery** — the model can call `give_up`, which is a first-class tool rather than a
-  fallthrough. Making "I am blocked" something it can *choose* is what stops it thrashing at a
-  dead end. The first real discovery run did exactly this, and its reasoning is in
-  `/evidence/examples/` — it had been told to type a credential placeholder, correctly diagnosed
-  that the placeholder was reaching the page literally, and refused both to guess demo
-  credentials and to bypass the session check by URL. That was a real bug in my engine, found by
-  the model declining to work around it.
-- **Replay** — a step classified `approval_required` (inherited from the capability unless
-  overridden), or a handler with no viable remedy.
-- **Policy** — a risk class the tenant's `requireApprovalFor` says needs a person.
-
-### Taking control of the live session
-
-The request carries capability, goal, step, page title and URL, visible alerts, and a screenshot
-taken *before* the handover, so the operator sees the state that caused the stop rather than
-whatever the page has become.
-
-**The ownership lock is what makes it a handoff rather than a pause.** `OwnedSurface` refuses
-every mutating action while a human holds the session. If automation could still click while a
-person types into the same form, control was never transferred and the request is just a
-message. Reads stay available, because the engine must observe to take the session back
-sensibly.
-
-Ownership changes **before** the request is routed. The resumed state is captured **while the
-human still holds it** — a person finishing up is still clicking, and automation must not be
-eligible to act until the engine has seen where the page ended up. Control returns even if the
-operator channel throws, because a crashed console must not leave a session permanently locked.
-
-### Handing control back
-
-The decision is **three-valued**, not approve/deny:
-
-| answer | effect |
+| Decision | Meaning |
 |---|---|
-| `p` / `proceed` | automation performs the step |
-| `d` / `done` | the human performed it; skip the step, then verify where the session ended up |
-| `a` / `abort`, **or anything else** | abort |
+| `proceed` | Automation performs the approved step |
+| `done` | The person performed it; skip the step and verify the resulting state |
+| `abort` | Stop the run |
 
-A person who takes over usually does not merely *authorise* the step — they perform it.
-Collapsing that into "approved" makes automation redo work already done, which on a transfer
-means transferring twice.
+Anything other than an exact accepted token aborts. Prefix matching once interpreted phrases
+such as "please abort" as consent, which is unacceptable for an irreversible action.
 
-Only exact tokens are accepted. Prefix matching read *"please abort"* as proceed and *"do not
-proceed"* as done — authorising an irreversible transfer from an answer that said the opposite.
-Any rule that guesses at intent fails open eventually.
+For browser handoffs, listeners installed with `page.addInitScript` survive navigation and record
+clicks, navigation, and the length—not the contents—of entered values. Editable content is never
+used as a label because it may itself be sensitive. Human actions are written separately from
+the automation event log.
 
-### What the human did
+`InterventionChannel` has terminal, scripted-test, and web-console implementations. The local
+console carries context and decisions while the operator acts in the real application window.
+Remote co-browsing is not implemented. Unattended escalation returns a resume token identifying
+the run and step, but there is no cross-process `resume` command; the browser closes when that
+process ends.
 
-Listeners are installed with `page.addInitScript`, so they re-attach on every document. A
-one-off injection dies at the first navigation, and an audit trail that silently stops recording
-looks exactly like a person who did nothing.
+## 7. Safety and data handling
 
-Events carry the field's identity and the **length** of what was entered, never the characters.
-Reading a label off an element is safe for a `<button>` and is what an auditor wants — but on a
-`contenteditable` that text *is* what the person typed, so nothing editable contributes its
-content. `input` is captured as well as `change` (coalesced), because an edit that never blurs
-fires no `change` and would vanish. Written to `human-actions.json`, separate from the event
-log.
+### Enforcement
 
-### The seam, and what is mocked
+Web containment uses three layers:
 
-`InterventionChannel` is a one-method interface with three implementations: a terminal prompt,
-a scripted one for tests, and a **web operator console** (`npm run console`). The console was
-built after the fact specifically to test the claim that swapping the operator surface changes
-nothing else — and it held: `replay.ts`, `handoff.ts` and `discovery.ts` are untouched by it.
-The only addition elsewhere was an optional `onEvent` hook on the evidence recorder so a run can
-be watched in flight.
+1. `GuardedSurface` checks every action, including recovery and output paths.
+2. A browser navigation guard blocks document requests to origins outside the allowlist.
+3. A landing check after every mutation catches client-side navigation that produces no document
+   request.
 
-What remains mocked is **co-browsing**. The console shows an operator why a run stopped and what
-the screen looked like, and takes their decision; they then act in the real application's
-browser window. A production deployment would stream that session to them instead. The
-control-transfer model does not change either way — which is the point of putting it behind an
-interface.
+Desktop containment uses the same guarded surface but checks allowed applications and optional
+document globs instead of HTTP origins. Origins are compared canonically; application IDs are
+exact; document policy uses the path reported separately from the window title.
 
-Not a stand-in: ownership genuinely transfers on the same live session, the lock is enforced
-rather than advised, the request carries enough context to act on, the human's actions are
-recorded, and control comes back with a fresh observation.
+`policy` is required by `replay()`. Policies can restrict origins, paths, applications,
+documents, action types, risk classes, total steps, runtime, and additional redaction patterns.
+Blocked actions win over allowed actions. The complete resolved policy is written to the run
+record so an auditor can answer why the action was permitted.
 
----
+Discovery has no completed artifact from which to read risk, so policy also carries regular
+expressions for risky controls. A proposed irreversible action is routed through the same
+approval mechanism as replay. Without an intervention channel it is refused and the model is
+told why.
 
-## 6. Safety
+### Evidence and secrets
 
-### Guardrails
+Redaction is applied at each sink:
 
-Enforcement is **three layers**, because no one of them covers the ground:
-
-1. **A guarded surface.** Every action — step loop, dismiss remedy, re-auth callback, output
-   collection — passes through it. An action type policy blocks cannot be performed by any
-   route.
-2. **A browser-level navigation guard.** Aborts document requests to origins outside the
-   allowlist. The engine is told "click this link", not where the link goes; a refused
-   navigation is `POLICY_DENIED` even when the click succeeded.
-3. **A landing check after every mutating action** (`navigate`, `click`, `fill`, `select`,
-   `clickAt`). A single-page app routes with `history.pushState()` and issues no document
-   request, so the network guard never sees it. Reads are not re-checked, because they cannot
-   move the session.
-
-Origins are compared exactly and canonically — `bank.test` never matches `bank.test.evil.com`.
-The allowlist parser rejects non-`http(s)` schemes, embedded credentials, and anything carrying
-a path or query, because `z.url()` cheerfully accepts `javascript:alert(1)`.
-
-`policy` is a **required** argument to `replay()`. A guard that can be forgotten is not a guard,
-and the type checker enforces that at every call site.
-
-### Risky and irreversible actions
-
-**Replay** reads an action's risk from the artifact: classified per step, inherited from the
-capability when a step does not override.
-
-**Discovery has no artifact** — it is producing one — so it infers risk instead, from
-`Policy.riskyControls`: regexes matched against a control's accessible name, description, or
-selector. A match routes the proposed action through the same approval gate replay uses. With no
-operator channel the action is refused outright and the model is told why, so an exploring
-agent cannot commit an irreversible transaction merely because nobody was watching.
-
-`/evidence/examples/02-discovery-refused-irreversible` is that gate firing: the model filled a
-transfer form, was refused the submit, and declined to bypass it by POSTing to `transfer.htm`
-directly — reasoning that doing so "would perform the same irreversible money movement while
-evading the approval check".
-
- `blocked` is
-absolute — no policy can opt into running it. Everything else is policy's decision via
-`requireApprovalFor`, so a cautious tenant can gate `safe` and a trusting one can gate nothing.
-
-In `transfer_funds`, only the submit step is `approval_required`: everything before it fills a
-form and can be abandoned safely. Classification belongs on the step that moves money.
-
-### Data handling
-
-Redaction happens at the **sink**, so omitting it requires bypassing the recorder. But not every
-sink is a string, and each is handled on its own terms:
-
-| sink | treatment |
+| Sink | Treatment |
 |---|---|
-| events, results, snapshots | JSON through the redactor |
-| **screenshots** | masked **at capture time** — a rendered pixel cannot be redacted afterwards |
-| **traces** | **off by default**; `--trace` warns and sets `traceUnredacted: true` |
+| Events, results, and snapshots | Structured data passes through the redactor before writing |
+| Screenshots | Sensitive regions are masked before image bytes are created |
+| Playwright traces | Off by default; opt-in traces are marked `traceUnredacted` |
 
-A Playwright trace archives request bodies, cookies and DOM snapshots — on this target
-demonstrably including `username=john&password=demo` — and a string redactor cannot reach inside
-a zip. The honest options were "off" or "declared", not "claimed safe". The default rich failure
-signal is instead a redacted ARIA snapshot, which is text and is the same view the agent reasons
-over.
+A trace may contain request bodies, cookies, and DOM snapshots that a string redactor cannot
+reliably sanitize. The default rich failure signal is a redacted ARIA snapshot instead.
 
-Secrets live in artifacts as **references**, never values. Inputs declared `sensitive` are
-masked by *name* in the run record, because the redactor deliberately ignores literals under
-three characters — scrubbing every `42` from a log destroys it — and a PIN is exactly that
-short.
+Secrets appear in artifacts as references, never literal values. Inputs declared `sensitive`
+are masked by field name in the run record, which also protects short values such as PINs that
+literal redaction intentionally ignores. `test/evidence-secrets.test.ts` scans every byte of
+every file produced by a test run.
 
-`test/evidence-secrets.test.ts` scans every byte of every file a run produces. That test exists
-because the first version of this claim was made by grepping the JSON files and missing the
-archive.
+### Known limits
 
-### Limits of the guardrail model
+- Web sub-resource requests are not origin-blocked; the guard constrains navigation, not every
+  possible data flow.
+- Screenshot masking is selector- or accessibility-role-based; sensitive body text may still be
+  visible.
+- Opt-in Playwright traces are explicitly unredacted.
+- Policy is supplied per run rather than declared as requirements on the artifact, so some
+  mismatches appear only when execution reaches the relevant action.
+- A real desktop helper is part of the trusted computing base and could misreport application,
+  document, or accessibility state.
+- Lifecycle status and fingerprints are not cryptographic signatures. Direct filesystem edits
+  outside the CLI and console are not prevented.
+- The console binds to localhost without authentication and is suitable only for local
+  development and demonstration.
 
-- **Sub-resource requests are unguarded.** Blocking them breaks pages that legitimately load
-  assets from elsewhere. The allowlist constrains where the *session* goes, not where *data*
-  could go; exfiltration via XHR to an allowed-but-unexpected endpoint is not addressed.
-- **Screenshot masking is selector-based.** Sensitive data rendered as body text is captured.
-- **A trace, once opted into, is unredacted.** Flagged in the record, not sanitised.
-- **Policy is per-run, not per-artifact.** An artifact cannot declare "I need these origins", so
-  a mismatch surfaces at step N rather than at validate time.
-- **No signing.** Nothing prevents an artifact being edited after review; `status: "approved"`
-  is an assertion, not a cryptographic one.
+## 8. Deliberate cuts and next work
 
----
+### Not built
 
-## 7. Cuts
+- **Persisted escalation sessions.** Resume tokens identify a stop but cannot restore a browser
+  or desktop session in another process.
+- **Production desktop adapters.** The protocol and TypeScript surface are complete; native OS
+  accessibility bindings are not.
+- **Remote co-browsing.** The console handles context and decisions, not streaming a live remote
+  session.
+- **Tenant infrastructure.** There is no registry, credential service, or override merge layer.
+- **LLM-assisted replay recovery.** Rejected for v1 because it would put a model back into the
+  production decision loop.
+- **Branches and loops in artifacts.** v1 remains linear; bounded handlers cover exceptional
+  paths.
+- **Discovered unhappy-path handlers.** A single successful recording cannot honestly infer how
+  an unseen application reports every failure.
+- **Artifact signing and authenticated review.** Git history and local lifecycle gates provide
+  provenance, not tamper resistance or user identity.
 
-### Deliberately not built
+### Recommended order
 
-**Remote co-browsing.** A local web operator console *was* built (§5, `npm run console`): it
-carries the escalation context, the screenshot and the decision. What is cut is streaming the
-live session to the operator — they act in the real application's browser window instead. The
-scope note permits mocking that, and the control-transfer model is unchanged by it.
+1. Persist sessions so an unattended escalation can genuinely resume.
+2. Implement one real platform accessibility helper against the existing desktop protocol.
+3. Add tenant-scoped capability resolution, credentials, and override merging.
+4. Suggest handlers from failed production runs for human review.
+5. Add signed artifacts and authentication before moving the console beyond localhost.
 
-**A platform accessibility helper.** The desktop surface itself is now implemented — the
-fourteen-member port, its wire protocol, the observation renderer, and containment for opaque
-locations, all exercised over a real child process (`src/desktop/`, `test/desktop.test.ts`).
-What is cut is the one process below it: the platform binary that answers seven requests from
-macOS `AXUIElement`, Windows UI Automation or AT-SPI2. A reference helper answers them from a
-hand-written tree instead, so the protocol is executable and the remaining work is specified
-rather than sketched. Writing it needs a machine, a platform language, and an accessibility
-permission grant a user has to give by hand — none of which this repository can stand in for.
+### What implementation and review exposed
 
-The containment gap named here previously is closed: policy carries `allowedApplications`, and
-the landing check dispatches on the kind of location a surface reports instead of skipping
-anything opaque.
+The design changed because executable tests and reviews found concrete failures: a locator that
+counted visible matches but returned the first DOM match; a postcondition retry that could
+repeat a transfer; policy checks bypassed by recovery paths; traces that contradicted the
+redaction claim; prefix matching that treated abort text as approval; and lifecycle edits that
+could preserve trust earned by an older revision.
 
-**Multi-tenant machinery.** Schema fields for identity, lineage and drift are present; the
-override resolver, registry and credential store are not — that is the scaling infrastructure
-the brief says is not rewarded.
-
-**LLM-assisted replay recovery.** Explicitly rejected. A bounded single-step fallback is a
-listed stretch goal, but it puts a model back in the production decision loop, and the
-determinism claim is worth more than the recovered runs.
-
-**A resumable escalation.** `escalated` returns a `resumeToken` that identifies the run and
-step — but there is no `resume <token>` command. An unattended escalation ends the process and
-the browser closes. Genuine resumption needs session persistence across processes. **This is
-the weakest part of the submission**: the token implies a capability that does not exist.
-
-**Branches, loops, conditionals in artifacts.** v1 is linear. Handlers cover the exceptional
-paths that matter without a DAG.
-
-**Promotion out of `draft`.** A discovered capability is refused by `invoke` unless
-`--allow-draft` is passed, and is hidden from the agent-facing catalog entirely — a draft an
-agent can see is a draft it will call. What is missing is anything that *earns* the transition
-to `approved`; today it is a human editing a field.
-
-**Discovered handlers.** Discovery records zero. A single happy-path run cannot know how an
-application reports "record not found", and inventing handlers would be fiction — which is
-partly why discovered artifacts land as `draft`.
-
-### What I would build next, in order
-
-1. **Make `escalated` resumable.** Persist the session so an operator can pick up a run started
-   by an unattended agent. It is the gap between a demo and a product.
-2. **A replay-stability score gating `draft → approved`.** The artifact has `status`; nothing
-   earns the transition. Replay N times, record the rate, promote on evidence.
-3. **The tenant override resolver.** Base artifact plus a keyed override map, with `derivedFrom`
-   lineage — the fields exist, the merge does not.
-4. **Handler suggestion from failed runs.** When a replay fails on unrecognised text, propose a
-   handler for review. Discovery cannot know the unhappy paths; production does.
-5. **A second surface adapter** — even a crude desktop one — to test whether the port is really
-   technology-neutral or merely shaped like Playwright.
-
-### What the process caught
-
-Worth recording, because it is the honest account of how this was built. Reviews caught, among
-others: a locator that counted *visible* matches and returned the *first DOM* match; a
-postcondition retry that re-submitted transfers; unredacted traces next to a claim that nothing
-leaked; policy checks the recovery path routed around; prefix matching that read "please abort"
-as consent; and three separate schema fields declared but never wired.
-
-Two were found by the system itself rather than by review: the model's `give_up` diagnosed a
-credential-substitution bug in my discovery engine, and replaying a freshly discovered
-capability exposed that parameters can hide in locators and conditions, not just values.
+The system also found two problems itself. `give_up` exposed a credential-template bug when the
+model refused to guess credentials, and replaying a newly discovered capability showed that
+parameters can hide in locators and conditions as well as action values. The Excel capability
+then exposed missing keys, mouse buttons, cell addressing, and document containment. Those are
+the useful results of the prototype: boundaries that survived contact with a second workflow
+and failure modes that became tests rather than promises.
